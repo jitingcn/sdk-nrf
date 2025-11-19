@@ -46,7 +46,8 @@ extern "C" {
 		.tx_mode = ESB_TXMODE_AUTO,				       \
 		.payload_length = 32,					       \
 		.selective_auto_ack = false,                                   \
-		.use_fast_ramp_up = false                                      \
+		.use_fast_ramp_up = false,                                     \
+		.ack_handler = 0                                               \
 	}
 
 /** @brief Default legacy radio parameters.
@@ -66,7 +67,8 @@ extern "C" {
 		.tx_mode = ESB_TXMODE_AUTO,				       \
 		.payload_length = 32,					       \
 		.selective_auto_ack = false,                                   \
-		.use_fast_ramp_up = false                                      \
+		.use_fast_ramp_up = false,                                     \
+		.ack_handler = 0                                               \
 	}
 
 /** @brief Macro to create an initializer for a TX data packet.
@@ -310,6 +312,15 @@ struct esb_evt {
 /** @brief Event handler prototype. */
 typedef void (*esb_event_handler)(const struct esb_evt *event);
 
+/** @brief ACK payload handler prototype.
+ *
+ *  Called from radio ISR context when a packet is received in PRX mode.
+ *  Must be lightweight (no blocking, no logging).
+ */
+typedef void (*esb_ack_handler)(const uint8_t *pdu_data, uint8_t data_length,
+				uint32_t pipe_id, struct esb_payload *ack_payload,
+				bool *has_ack_payload);
+
 /** @brief Main configuration structure for the module. */
 struct esb_config {
 	enum esb_protocol protocol;		/**< Protocol. */
@@ -354,6 +365,7 @@ struct esb_config {
 				 *  between nRF52 and/or nRF53 Series devices, this delay can
 				 *  be reduced to 40 µs.
 				 */
+	esb_ack_handler ack_handler;	/**< ACK handler. */
 };
 
 /** @brief Initialize the Enhanced ShockBurst module.

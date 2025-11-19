@@ -265,7 +265,9 @@ static atomic_t errata_216_status = ATOMIC_INIT(ERRATA_216_DISABLED);
 static uint32_t errata_216_timer_shorts;
 
 static esb_event_handler event_handler;
+static esb_ack_handler ack_handler;
 static struct esb_payload *current_payload;
+static struct esb_payload ack_payload;
 
 /* FIFOs and buffers */
 static struct payload_tx_fifo tx_fifo;
@@ -1594,12 +1596,24 @@ static void clear_events_restart_rx(void)
 
 static void prepare_ack_pdu_dpl(bool retransmit_payload, struct pipe_info *pipe_info)
 {
+	bool has_ack_payload = false;
 	struct esb_radio_pdu *tx_pdu = (struct esb_radio_pdu *)tx_payload_buffer;
 	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
 
 	uint32_t pipe = nrf_radio_rxmatch_get(NRF_RADIO);
 
-	if (atomic_get(&tx_fifo.count) > 0 && ack_pl_wrap_pipe[pipe] != NULL) {
+	if (ack_handler) {
+		ack_handler(rx_pdu->data, rx_pdu->type.dpl_pdu.length, pipe,
+			    &ack_payload, &has_ack_payload);
+		if (has_ack_payload) {
+			current_payload = &ack_payload;
+			pipe_info->ack_payload = true;
+
+			tx_pdu->type.dpl_pdu.length = current_payload->length;
+			memcpy(tx_pdu->data, current_payload->data,
+			       current_payload->length);
+		}
+	} else if (atomic_get(&tx_fifo.count) > 0 && ack_pl_wrap_pipe[pipe] != NULL) {
 		current_payload = ack_pl_wrap_pipe[pipe]->p_payload;
 
 		/* Pipe stays in ACK with payload until TX FIFO is empty */
@@ -1624,11 +1638,11 @@ static void prepare_ack_pdu_dpl(bool retransmit_payload, struct pipe_info *pipe_
 
 			tx_pdu->type.dpl_pdu.length = current_payload->length;
 			memcpy(tx_pdu->data, current_payload->data, current_payload->length);
-		} else {
-			pipe_info->ack_payload = false;
-			tx_pdu->type.dpl_pdu.length = 0;
+			has_ack_payload = true;
 		}
-	} else {
+	}
+
+	if (!has_ack_payload) {
 		pipe_info->ack_payload = false;
 		tx_pdu->type.dpl_pdu.length = 0;
 	}
@@ -1913,6 +1927,7 @@ int esb_init(const struct esb_config *config)
 	}
 
 	event_handler = config->event_handler;
+	ack_handler = config->ack_handler;
 
 	memcpy(&esb_cfg, config, sizeof(esb_cfg));
 
@@ -2117,9 +2132,13 @@ int esb_write_payload(const struct esb_payload *payload)
 			tx_fifo.back = 0;
 		}
 
-
 		atomic_inc(&tx_fifo.count);
 	} else {
+		/* Skip legacy ACK payload queue when using custom ack_handler */
+		if (ack_handler) {
+			return 0;
+		}
+
 		struct payload_wrap *new_ack_payload = find_free_payload_cont();
 
 		if (new_ack_payload != 0) {
