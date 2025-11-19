@@ -270,7 +270,9 @@ static const struct mbox_dt_spec off_channel =
 #endif /* ERRATA_216_PRESENT */
 
 static esb_event_handler event_handler;
+static esb_ack_handler ack_handler;
 static struct esb_payload *current_payload;
+static struct esb_payload ack_payload;
 
 /* FIFOs and buffers */
 static struct payload_tx_fifo tx_fifo;
@@ -1544,12 +1546,30 @@ static void clear_events_restart_rx(void)
 static void on_radio_disabled_rx_dpl(bool retransmit_payload,
 				     struct pipe_info *pipe_info)
 {
+	bool has_ack_payload = false;
 	struct esb_radio_pdu *tx_pdu = (struct esb_radio_pdu *)tx_payload_buffer;
 	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
 
 	uint32_t pipe = nrf_radio_rxmatch_get(NRF_RADIO);
 
-	if (tx_fifo.count > 0 && ack_pl_wrap_pipe[pipe] != NULL) {
+	if (ack_handler) {
+		ack_handler(rx_pdu->data, rx_pdu->type.dpl_pdu.length, pipe,
+			    &ack_payload, &has_ack_payload);
+		if (has_ack_payload) {
+			current_payload = &ack_payload;
+
+			if (current_payload->length > CONFIG_ESB_MAX_PAYLOAD_LENGTH) {
+				has_ack_payload = false;
+			} else {
+				pipe_info->ack_payload = true;
+				update_rf_payload_format(current_payload->length);
+
+				tx_pdu->type.dpl_pdu.length = current_payload->length;
+				memcpy(tx_pdu->data, current_payload->data,
+				       current_payload->length);
+			}
+		}
+	} else if (tx_fifo.count > 0 && ack_pl_wrap_pipe[pipe] != NULL) {
 		current_payload = ack_pl_wrap_pipe[pipe]->p_payload;
 
 		/* Pipe stays in ACK with payload until TX FIFO is empty */
@@ -1575,12 +1595,11 @@ static void on_radio_disabled_rx_dpl(bool retransmit_payload,
 
 			tx_pdu->type.dpl_pdu.length = current_payload->length;
 			memcpy(tx_pdu->data, current_payload->data, current_payload->length);
-		} else {
-			pipe_info->ack_payload = false;
-			update_rf_payload_format(0);
-			tx_pdu->type.dpl_pdu.length = 0;
+			has_ack_payload = true;
 		}
-	} else {
+	}
+
+	if (!has_ack_payload) {
 		pipe_info->ack_payload = false;
 		update_rf_payload_format(0);
 		tx_pdu->type.dpl_pdu.length = 0;
@@ -1850,6 +1869,7 @@ int esb_init(const struct esb_config *config)
 	}
 
 	event_handler = config->event_handler;
+	ack_handler = config->ack_handler;
 
 	memcpy(&esb_cfg, config, sizeof(esb_cfg));
 
@@ -2077,6 +2097,11 @@ int esb_write_payload(const struct esb_payload *payload)
 
 	if (payload == NULL) {
 		return -EINVAL;
+	}
+
+	if ((esb_cfg.mode == ESB_MODE_PRX) && ack_handler) {
+		/* ACK payloads are provided dynamically through ack_handler. */
+		return 0;
 	}
 
 	if ((payload->length == 0) || (payload->length > CONFIG_ESB_MAX_PAYLOAD_LENGTH) ||
