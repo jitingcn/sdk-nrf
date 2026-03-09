@@ -53,11 +53,14 @@ LOG_MODULE_REGISTER(esb, CONFIG_ESB_LOG_LEVEL);
 /* Radio Tx ramp-up time in microseconds. */
 #define TX_RAMP_UP_TIME_US 129
 
-/* Radio Rx fast ramp-up time in microseconds. */
+/* Radio Tx fast ramp-up time in microseconds. */
 #define TX_FAST_RAMP_UP_TIME_US 40
 
 /* Radio Rx ramp-up time in microseconds. */
 #define RX_RAMP_UP_TIME_US 124
+
+/* Radio Rx fast ramp-up time in microseconds. */
+#define RX_FAST_RAMP_UP_TIME_US 40
 
 /* Interrupt flags */
 /* Interrupt mask value for TX success. */
@@ -298,7 +301,7 @@ static volatile uint32_t wait_for_ack_timeout_us;
 static uint32_t radio_shorts_common = RADIO_SHORTS_COMMON;
 static const bool fast_switching = IS_ENABLED(CONFIG_ESB_FAST_SWITCHING);
 
-static const mpsl_fem_event_t rx_event = {
+static mpsl_fem_event_t rx_event = {
 	.type = MPSL_FEM_EVENT_TYPE_TIMER,
 	.event.timer = {
 		.p_timer_instance = ESB_NRF_TIMER_INSTANCE,
@@ -309,7 +312,7 @@ static const mpsl_fem_event_t rx_event = {
 	},
 };
 
-static const mpsl_fem_event_t tx_event = {
+static mpsl_fem_event_t tx_event = {
 	.type = MPSL_FEM_EVENT_TYPE_TIMER,
 	.event.timer = {
 		.p_timer_instance = ESB_NRF_TIMER_INSTANCE,
@@ -502,6 +505,8 @@ static void esb_fem_for_tx_ack(void)
 {
 	/* Timer is running and timer's shorts and PPI connections have been configured. */
 	mpsl_fem_lna_configuration_clear();
+	tx_event.event.timer.counter_period.end =
+		esb_cfg.use_fast_ramp_up ? TX_FAST_RAMP_UP_TIME_US : TX_RAMP_UP_TIME_US;
 	mpsl_fem_pa_configuration_set(&tx_event, &disable_event);
 }
 
@@ -573,8 +578,10 @@ void esb_fem_for_tx_retry(void)
 	/* The radio is ramped-up with delay set in the timer compare channel 1.
 	 * Calculate the ramp-up time for external front-end module.
 	 */
+	uint16_t fem_ramp_up = esb_cfg.use_fast_ramp_up ? TX_FAST_RAMP_UP_TIME_US :
+							      TX_RAMP_UP_TIME_US;
 	tx_time_shifted.event.timer.counter_period.end =
-		nrf_timer_cc_get(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL1) + TX_RAMP_UP_TIME_US;
+		nrf_timer_cc_get(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL1) + fem_ramp_up;
 
 	/* This starts the ESB TIMER on the radio disabled event. This connection is needed even
 	 * when front-end module is not used.
@@ -1191,6 +1198,8 @@ static void start_tx_transaction(void)
 		if (fast_switching) {
 			nrf_radio_shorts_set(NRF_RADIO, radio_shorts_common);
 			nrf_radio_int_enable(NRF_RADIO, ESB_RADIO_INT_END_MASK);
+		} else if (esb_cfg.use_fast_ramp_up) {
+			nrf_radio_shorts_set(NRF_RADIO, radio_shorts_common);
 		} else {
 			nrf_radio_shorts_set(NRF_RADIO,
 					(radio_shorts_common | NRF_RADIO_SHORT_DISABLED_RXEN_MASK));
@@ -1220,6 +1229,8 @@ static void start_tx_transaction(void)
 			if (fast_switching) {
 				nrf_radio_shorts_set(NRF_RADIO, radio_shorts_common);
 				nrf_radio_int_enable(NRF_RADIO, ESB_RADIO_INT_END_MASK);
+			} else if (esb_cfg.use_fast_ramp_up) {
+				nrf_radio_shorts_set(NRF_RADIO, radio_shorts_common);
 			} else {
 				nrf_radio_shorts_set(NRF_RADIO,
 					(radio_shorts_common | NRF_RADIO_SHORT_DISABLED_RXEN_MASK));
@@ -1274,6 +1285,7 @@ static void start_tx_transaction(void)
 	update_radio_tx_power();
 
 	nrf_radio_packetptr_set(NRF_RADIO, pdu);
+	__DMB();
 
 	NVIC_ClearPendingIRQ(ESB_RADIO_IRQ_NUMBER);
 	irq_enable(ESB_RADIO_IRQ_NUMBER);
@@ -1344,6 +1356,18 @@ static void on_radio_disabled_tx(void)
 	esb_ppi_for_txrx_clear(false, true);
 	/* The timer was triggered on radio disabled event so we can clear PPI connections here. */
 	esb_ppi_for_fem_clear();
+
+	if (!fast_switching && esb_cfg.use_fast_ramp_up) {
+		/* With fast ramp-up, the timer CC2 COMPARE2_STOP short may have already
+		 * fired (CC2 = fast ramp-up time ~40us) before this ISR runs, leaving the
+		 * timer stopped. Stop and clear it explicitly to ensure a known state
+		 * before reconfiguring.
+		 */
+		nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_STOP);
+		nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_CLEAR);
+		nrf_timer_shorts_set(esb_timer.p_reg, 0);
+	}
+
 	esb_fem_for_rx_ack();
 
 	/* Remove the DISABLED -> RXEN shortcut, to make sure the radio stays
@@ -1383,6 +1407,7 @@ static void on_radio_disabled_tx(void)
 	esb_ppi_for_wait_for_ack_set();
 	esb_ppi_for_retransmission_clear();
 
+	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_ADDRESS);
 	nrf_radio_event_clear(NRF_RADIO, ESB_RADIO_EVENT_END);
 
 	if (esb_cfg.protocol == ESB_PROTOCOL_ESB) {
@@ -1390,7 +1415,12 @@ static void on_radio_disabled_tx(void)
 	}
 
 	nrf_radio_packetptr_set(NRF_RADIO, rx_payload_buffer);
-	if (fast_switching) {
+	__DMB();
+	if (fast_switching || esb_cfg.use_fast_ramp_up) {
+		/* Explicitly start the timer and trigger RXEN since we don't use
+		 * DISABLED_RXEN short with fast ramp-up.
+		 */
+		nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_START);
 		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_RXEN);
 	}
 	on_radio_disabled = on_radio_disabled_tx_wait_for_ack;
@@ -1461,7 +1491,7 @@ static void on_radio_disabled_tx_wait_for_ack(void)
 			 * be entered again as soon as the system timer reaches
 			 * CC[1].
 			 */
-			if (fast_switching) {
+			if (fast_switching || esb_cfg.use_fast_ramp_up) {
 				nrf_radio_shorts_set(NRF_RADIO, radio_shorts_common);
 			} else {
 				nrf_radio_shorts_set(NRF_RADIO,
@@ -1470,6 +1500,7 @@ static void on_radio_disabled_tx_wait_for_ack(void)
 			update_rf_payload_format(current_payload->length);
 
 			nrf_radio_packetptr_set(NRF_RADIO, tx_payload_buffer);
+			__DMB();
 
 			on_radio_disabled = on_radio_disabled_tx;
 			esb_state = ESB_STATE_PTX_TX_ACK;
@@ -1525,6 +1556,7 @@ static void clear_events_restart_rx(void)
 	update_rf_payload_format(esb_cfg.payload_length);
 
 	nrf_radio_packetptr_set(NRF_RADIO, rx_payload_buffer);
+	__DMB();
 
 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_DISABLED);
 	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
@@ -1535,7 +1567,12 @@ static void clear_events_restart_rx(void)
 
 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_DISABLED);
 
-	nrf_radio_shorts_set(NRF_RADIO, (radio_shorts_common | NRF_RADIO_SHORT_DISABLED_TXEN_MASK));
+	if (esb_cfg.use_fast_ramp_up) {
+		nrf_radio_shorts_set(NRF_RADIO, radio_shorts_common);
+	} else {
+		nrf_radio_shorts_set(NRF_RADIO,
+			(radio_shorts_common | NRF_RADIO_SHORT_DISABLED_TXEN_MASK));
+	}
 
 	esb_ppi_for_txrx_set(true, false);
 	esb_fem_for_rx_set();
@@ -1640,6 +1677,19 @@ static void on_radio_disabled_rx(void)
 
 	/* Check if an ack should be sent */
 	if ((esb_cfg.selective_auto_ack == false) || rx_pdu->type.dpl_pdu.no_ack) {
+		if (!fast_switching && esb_cfg.use_fast_ramp_up) {
+			/* With fast ramp-up, DISABLED_TXEN short is not used.
+			 * Stop timer that may have been auto-started by PPI on
+			 * the DISABLED event, and clear CC2 shorts that could
+			 * stop the timer prematurely when we restart it.
+			 */
+			nrf_timer_task_trigger(esb_timer.p_reg,
+					       NRF_TIMER_TASK_STOP);
+			nrf_timer_task_trigger(esb_timer.p_reg,
+					       NRF_TIMER_TASK_CLEAR);
+			nrf_timer_shorts_set(esb_timer.p_reg, 0);
+		}
+
 		esb_fem_for_tx_ack();
 
 		switch (esb_cfg.protocol) {
@@ -1662,9 +1712,15 @@ static void on_radio_disabled_rx(void)
 
 		nrf_radio_txaddress_set(NRF_RADIO, nrf_radio_rxmatch_get(NRF_RADIO));
 		nrf_radio_packetptr_set(NRF_RADIO, tx_pdu);
+		__DMB();
 
 		if (fast_switching) {
 			nrf_radio_shorts_set(NRF_RADIO, radio_shorts_common);
+			nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_TXEN);
+		} else if (esb_cfg.use_fast_ramp_up) {
+			nrf_radio_shorts_set(NRF_RADIO, radio_shorts_common);
+			nrf_timer_task_trigger(esb_timer.p_reg,
+					       NRF_TIMER_TASK_START);
 			nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_TXEN);
 		} else {
 			nrf_radio_shorts_set(NRF_RADIO,
@@ -1690,13 +1746,24 @@ static void on_radio_disabled_rx(void)
 
 static void on_radio_disabled_rx_ack(void)
 {
+	if (!fast_switching && esb_cfg.use_fast_ramp_up) {
+		nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_STOP);
+		nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_CLEAR);
+		nrf_timer_shorts_set(esb_timer.p_reg, 0);
+	}
+
 	esb_fem_for_ack_rx();
 
 	update_rf_payload_format(esb_cfg.payload_length);
 
 	nrf_radio_packetptr_set(NRF_RADIO, rx_payload_buffer);
+	__DMB();
 	if (fast_switching) {
 		nrf_radio_shorts_set(NRF_RADIO, radio_shorts_common);
+		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_RXEN);
+	} else if (esb_cfg.use_fast_ramp_up) {
+		nrf_radio_shorts_set(NRF_RADIO, radio_shorts_common);
+		nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_START);
 		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_RXEN);
 	} else {
 		nrf_radio_shorts_set(NRF_RADIO, (radio_shorts_common |
@@ -1909,6 +1976,14 @@ int esb_init(const struct esb_config *config)
 	disable_event.event.generic.event = esb_ppi_radio_disabled_get();
 
 	nrf_radio_fast_ramp_up_enable_set(NRF_RADIO, esb_cfg.use_fast_ramp_up);
+
+	if (esb_cfg.use_fast_ramp_up) {
+		rx_event.event.timer.counter_period.end = RX_FAST_RAMP_UP_TIME_US;
+		tx_event.event.timer.counter_period.end = TX_FAST_RAMP_UP_TIME_US;
+	} else {
+		rx_event.event.timer.counter_period.end = RX_RAMP_UP_TIME_US;
+		tx_event.event.timer.counter_period.end = TX_RAMP_UP_TIME_US;
+	}
 
 #if defined(CONFIG_ESB_FAST_CHANNEL_SWITCHING)
 		nrf_radio_int_enable(NRF_RADIO, NRF_RADIO_INT_RXREADY_MASK);
@@ -2232,6 +2307,8 @@ int esb_start_rx(void)
 	if (fast_switching) {
 		nrf_radio_shorts_set(NRF_RADIO, radio_shorts_common);
 		nrf_radio_int_enable(NRF_RADIO, ESB_RADIO_INT_END_MASK);
+	} else if (esb_cfg.use_fast_ramp_up) {
+		nrf_radio_shorts_set(NRF_RADIO, radio_shorts_common);
 	} else {
 		nrf_radio_shorts_set(NRF_RADIO, (radio_shorts_common |
 						 NRF_RADIO_SHORT_DISABLED_TXEN_MASK));
@@ -2245,6 +2322,7 @@ int esb_start_rx(void)
 	nrf_radio_frequency_set(NRF_RADIO, (RADIO_BASE_FREQUENCY + esb_addr.rf_channel));
 	atomic_clear_bit(&esb_addr.rf_channel_flags, RF_CHANNEL_UPDATE_FLAG);
 	nrf_radio_packetptr_set(NRF_RADIO, rx_payload_buffer);
+	__DMB();
 
 	NVIC_ClearPendingIRQ(ESB_RADIO_IRQ_NUMBER);
 	irq_enable(ESB_RADIO_IRQ_NUMBER);
