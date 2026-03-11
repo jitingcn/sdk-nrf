@@ -1442,8 +1442,26 @@ static void on_radio_disabled_tx_wait_for_ack(void)
 	mpsl_fem_disable();
 
 	/* If the radio has received a packet and the CRC status is OK */
-	if (nrf_radio_event_check(NRF_RADIO, ESB_RADIO_EVENT_END) &&
-	    nrf_radio_crc_status_check(NRF_RADIO)) {
+	bool ack_received = nrf_radio_event_check(NRF_RADIO, ESB_RADIO_EVENT_END) &&
+			    nrf_radio_crc_status_check(NRF_RADIO);
+
+	/*
+	 * When multiple devices share the same pipe/address, PTX may receive another
+	 * device's uplink packet during the ACK RX window. That packet will have
+	 * valid CRC and will trigger END, but it is not the ACK for current_payload.
+	 *
+	 * Use PID match as a lightweight filter: PRX copies RX PID into ACK PID, so
+	 * a valid ACK must have the same PID as the transmitted packet.
+	 */
+	if (ack_received && current_payload) {
+		if (esb_cfg.protocol == ESB_PROTOCOL_ESB_DPL) {
+			ack_received = (rx_pdu->type.dpl_pdu.pid == current_payload->pid);
+		} else if (esb_cfg.protocol == ESB_PROTOCOL_ESB) {
+			ack_received = (rx_pdu->type.fixed_pdu.pid == current_payload->pid);
+		}
+	}
+
+	if (ack_received) {
 		interrupt_flags |= INT_TX_SUCCESS_MSK;
 		last_tx_attempts = esb_cfg.retransmit_count - retransmits_remaining + 1;
 
