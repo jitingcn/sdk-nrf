@@ -1285,7 +1285,6 @@ static void start_tx_transaction(void)
 	update_radio_tx_power();
 
 	nrf_radio_packetptr_set(NRF_RADIO, pdu);
-	__DMB();
 
 	NVIC_ClearPendingIRQ(ESB_RADIO_IRQ_NUMBER);
 	irq_enable(ESB_RADIO_IRQ_NUMBER);
@@ -1415,7 +1414,7 @@ static void on_radio_disabled_tx(void)
 	}
 
 	nrf_radio_packetptr_set(NRF_RADIO, rx_payload_buffer);
-	__DMB();
+
 	if (fast_switching || esb_cfg.use_fast_ramp_up) {
 		/* Explicitly start the timer and trigger RXEN since we don't use
 		 * DISABLED_RXEN short with fast ramp-up.
@@ -1518,7 +1517,6 @@ static void on_radio_disabled_tx_wait_for_ack(void)
 			update_rf_payload_format(current_payload->length);
 
 			nrf_radio_packetptr_set(NRF_RADIO, tx_payload_buffer);
-			__DMB();
 
 			on_radio_disabled = on_radio_disabled_tx;
 			esb_state = ESB_STATE_PTX_TX_ACK;
@@ -1574,7 +1572,6 @@ static void clear_events_restart_rx(void)
 	update_rf_payload_format(esb_cfg.payload_length);
 
 	nrf_radio_packetptr_set(NRF_RADIO, rx_payload_buffer);
-	__DMB();
 
 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_DISABLED);
 	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
@@ -1730,7 +1727,6 @@ static void on_radio_disabled_rx(void)
 
 		nrf_radio_txaddress_set(NRF_RADIO, nrf_radio_rxmatch_get(NRF_RADIO));
 		nrf_radio_packetptr_set(NRF_RADIO, tx_pdu);
-		__DMB();
 
 		if (fast_switching) {
 			nrf_radio_shorts_set(NRF_RADIO, radio_shorts_common);
@@ -1775,7 +1771,7 @@ static void on_radio_disabled_rx_ack(void)
 	update_rf_payload_format(esb_cfg.payload_length);
 
 	nrf_radio_packetptr_set(NRF_RADIO, rx_payload_buffer);
-	__DMB();
+
 	if (fast_switching) {
 		nrf_radio_shorts_set(NRF_RADIO, radio_shorts_common);
 		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_RXEN);
@@ -2340,7 +2336,6 @@ int esb_start_rx(void)
 	nrf_radio_frequency_set(NRF_RADIO, (RADIO_BASE_FREQUENCY + esb_addr.rf_channel));
 	atomic_clear_bit(&esb_addr.rf_channel_flags, RF_CHANNEL_UPDATE_FLAG);
 	nrf_radio_packetptr_set(NRF_RADIO, rx_payload_buffer);
-	__DMB();
 
 	NVIC_ClearPendingIRQ(ESB_RADIO_IRQ_NUMBER);
 	irq_enable(ESB_RADIO_IRQ_NUMBER);
