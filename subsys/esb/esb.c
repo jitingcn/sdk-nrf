@@ -47,8 +47,14 @@ LOG_MODULE_REGISTER(esb, CONFIG_ESB_LOG_LEVEL);
 /* 4 Mb RX wait for acknowledgment time-out value. */
 #define RX_ACK_TIMEOUT_US_4MBPS 160
 
-/* Minimum retransmit time */
-#define RETRANSMIT_DELAY_MIN 435
+/* Minimum retransmit time depends on bitrate (ACK RX timeout) and TX ramp-up.
+ *
+ * In general:
+ * retransmit_delay_min_us = rx_ack_timeout_us(bitrate) + ADDR_EVENT_LATENCY_US + tx_ramp_up_us(use_fast_ramp_up)
+ *
+ * This is enforced dynamically (not by a fixed constant) in
+ * [`update_radio_parameters()`] and [`esb_set_retransmit_delay()`].
+ */
 
 /* Radio Tx ramp-up time in microseconds. */
 #define TX_RAMP_UP_TIME_US 129
@@ -923,45 +929,68 @@ static void update_radio_tx_power(void)
 #endif /* !(defined(CONFIG_SOC_SERIES_NRF54HX) || defined(CONFIG_SOC_SERIES_NRF54LX)) */
 }
 
+static uint16_t rx_ack_timeout_us_get(enum esb_bitrate bitrate)
+{
+	switch (bitrate) {
+#if defined(RADIO_MODE_MODE_Nrf_4Mbit_0BT6)
+	case ESB_BITRATE_4MBPS:
+		return RX_ACK_TIMEOUT_US_4MBPS;
+#endif /* defined(RADIO_MODE_MODE_Nrf_4Mbit_0BT6) */
+
+	case ESB_BITRATE_2MBPS:
+#if defined(RADIO_MODE_MODE_Ble_2Mbit)
+	case ESB_BITRATE_2MBPS_BLE:
+#endif /* defined(RADIO_MODE_MODE_Ble_2Mbit) */
+		return RX_ACK_TIMEOUT_US_2MBPS;
+
+	case ESB_BITRATE_1MBPS:
+		return RX_ACK_TIMEOUT_US_1MBPS;
+
+#if defined(RADIO_MODE_MODE_Nrf_250Kbit)
+	case ESB_BITRATE_250KBPS:
+		return RX_ACK_TIMEOUT_US_250KBPS;
+#endif /* defined(RADIO_MODE_MODE_Nrf_250Kbit) */
+
+	case ESB_BITRATE_1MBPS_BLE:
+		return RX_ACK_TIMEOUT_US_1MBPS_BLE;
+
+	default:
+		return 0;
+	}
+}
+
+static uint16_t tx_ramp_up_us_get(bool use_fast_ramp_up)
+{
+	return use_fast_ramp_up ? TX_FAST_RAMP_UP_TIME_US : TX_RAMP_UP_TIME_US;
+}
+
+static uint16_t retransmit_delay_min_us(enum esb_bitrate bitrate, bool use_fast_ramp_up)
+{
+	uint16_t ack_timeout = rx_ack_timeout_us_get(bitrate);
+
+	if (ack_timeout == 0U) {
+		/* Invalid bitrate => make the config invalid by forcing a very large minimum. */
+		return 0xFFFF;
+	}
+
+	uint32_t min_delay = (uint32_t)ack_timeout + ADDR_EVENT_LATENCY_US +
+		tx_ramp_up_us_get(use_fast_ramp_up);
+
+	return (uint16_t)min_delay;
+}
+
 static bool update_radio_bitrate(void)
 {
 	nrf_radio_mode_set(NRF_RADIO, esb_cfg.bitrate);
 
-	switch (esb_cfg.bitrate) {
+	uint16_t ack_timeout = rx_ack_timeout_us_get(esb_cfg.bitrate);
 
-#if defined(RADIO_MODE_MODE_Nrf_4Mbit_0BT6)
-	case ESB_BITRATE_4MBPS:
-		wait_for_ack_timeout_us = RX_ACK_TIMEOUT_US_4MBPS;
-		break;
-#endif /* defined(RADIO_MODE_MODE_Nrf_4Mbit_0BT6) */
-
-	case ESB_BITRATE_2MBPS:
-
-#if defined(RADIO_MODE_MODE_Ble_2Mbit)
-	case ESB_BITRATE_2MBPS_BLE:
-#endif /* defined(RADIO_MODE_MODE_Ble_2Mbit) */
-
-		wait_for_ack_timeout_us = RX_ACK_TIMEOUT_US_2MBPS;
-		break;
-
-	case ESB_BITRATE_1MBPS:
-		wait_for_ack_timeout_us = RX_ACK_TIMEOUT_US_1MBPS;
-		break;
-
-#if defined(RADIO_MODE_MODE_Nrf_250Kbit)
-	case ESB_BITRATE_250KBPS:
-		wait_for_ack_timeout_us = RX_ACK_TIMEOUT_US_250KBPS;
-		break;
-#endif /* defined(RADIO_MODE_MODE_Nrf_250Kbit) */
-
-	case ESB_BITRATE_1MBPS_BLE:
-		wait_for_ack_timeout_us = RX_ACK_TIMEOUT_US_1MBPS_BLE;
-		break;
-
-	default:
+	if (ack_timeout == 0U) {
 		/* Should not be reached */
 		return false;
 	}
+
+	wait_for_ack_timeout_us = ack_timeout;
 
 	return true;
 }
@@ -1020,8 +1049,8 @@ static bool update_radio_parameters(void)
 	params_valid &= update_radio_protocol();
 	params_valid &= update_radio_crc();
 	update_rf_payload_format(esb_cfg.payload_length);
-	params_valid &=
-	    (esb_cfg.retransmit_delay >= RETRANSMIT_DELAY_MIN);
+	params_valid &= (esb_cfg.retransmit_delay >=
+		retransmit_delay_min_us(esb_cfg.bitrate, esb_cfg.use_fast_ramp_up));
 
 	return params_valid;
 }
@@ -2603,7 +2632,7 @@ int esb_set_retransmit_delay(uint16_t delay)
 	if (esb_state != ESB_STATE_IDLE) {
 		return -EBUSY;
 	}
-	if (delay < RETRANSMIT_DELAY_MIN) {
+	if (delay < retransmit_delay_min_us(esb_cfg.bitrate, esb_cfg.use_fast_ramp_up)) {
 		return -EINVAL;
 	}
 
