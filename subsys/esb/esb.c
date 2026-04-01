@@ -1625,9 +1625,11 @@ static void clear_events_restart_rx(void)
 }
 
 static void on_radio_disabled_rx_dpl(bool retransmit_payload,
-				     struct pipe_info *pipe_info)
+				     struct pipe_info *pipe_info,
+				     bool *suppress_ack)
 {
 	bool has_ack_payload = false;
+	bool suppress_ack_local = false;
 	struct esb_radio_pdu *tx_pdu = (struct esb_radio_pdu *)tx_payload_buffer;
 	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
 
@@ -1635,7 +1637,10 @@ static void on_radio_disabled_rx_dpl(bool retransmit_payload,
 
 	if (ack_handler) {
 		ack_handler(rx_pdu->data, rx_pdu->type.dpl_pdu.length, pipe,
-			    &ack_payload, &has_ack_payload);
+			    &ack_payload, &has_ack_payload, &suppress_ack_local);
+		if (suppress_ack_local) {
+			has_ack_payload = false;
+		}
 		if (has_ack_payload) {
 			current_payload = &ack_payload;
 
@@ -1680,6 +1685,10 @@ static void on_radio_disabled_rx_dpl(bool retransmit_payload,
 		}
 	}
 
+	if (suppress_ack != NULL) {
+		*suppress_ack = suppress_ack_local;
+	}
+
 	if (!has_ack_payload) {
 		pipe_info->ack_payload = false;
 		update_rf_payload_format(0);
@@ -1694,6 +1703,8 @@ static void on_radio_disabled_rx(void)
 {
 	bool retransmit_payload = false;
 	bool send_rx_event = true;
+	bool suppress_ack = false;
+	bool ack_requested = false;
 	struct pipe_info *pipe_info;
 	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
 	struct esb_radio_pdu *tx_pdu = (struct esb_radio_pdu *)tx_payload_buffer;
@@ -1719,8 +1730,13 @@ static void on_radio_disabled_rx(void)
 	pipe_info->pid = rx_pdu->type.dpl_pdu.pid;
 	pipe_info->crc = nrf_radio_rxcrc_get(NRF_RADIO);
 
+	ack_requested = (esb_cfg.selective_auto_ack == false) || rx_pdu->type.dpl_pdu.no_ack;
+	if (ack_requested && esb_cfg.protocol == ESB_PROTOCOL_ESB_DPL) {
+		on_radio_disabled_rx_dpl(retransmit_payload, pipe_info, &suppress_ack);
+	}
+
 	/* Check if an ack should be sent */
-	if ((esb_cfg.selective_auto_ack == false) || rx_pdu->type.dpl_pdu.no_ack) {
+	if (ack_requested && !suppress_ack) {
 		if (!fast_switching && esb_cfg.use_fast_ramp_up) {
 			/* With fast ramp-up, DISABLED_TXEN short is not used.
 			 * Stop timer that may have been auto-started by PPI on
@@ -1738,7 +1754,6 @@ static void on_radio_disabled_rx(void)
 
 		switch (esb_cfg.protocol) {
 		case ESB_PROTOCOL_ESB_DPL:
-			on_radio_disabled_rx_dpl(retransmit_payload, pipe_info);
 			break;
 
 		case ESB_PROTOCOL_ESB:

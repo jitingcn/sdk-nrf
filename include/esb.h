@@ -315,10 +315,14 @@ typedef void (*esb_event_handler)(const struct esb_evt *event);
  *
  *  Called from radio ISR context when a packet is received in PRX mode.
  *  Must be lightweight (no blocking, no logging).
+ *
+ *  @p has_ack_payload and @p suppress_ack must be valid pointers.
+ *  Set @p has_ack_payload to true to attach an ACK payload.
+ *  Set @p suppress_ack to true to suppress the link-layer ACK entirely.
  */
 typedef void (*esb_ack_handler)(const uint8_t *pdu_data, uint8_t data_length,
 				uint32_t pipe_id, struct esb_payload *ack_payload,
-				bool *has_ack_payload);
+				bool *has_ack_payload, bool *suppress_ack);
 
 /** @brief Main configuration structure for the module. */
 struct esb_config {
