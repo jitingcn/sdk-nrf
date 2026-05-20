@@ -311,6 +311,11 @@ struct esb_evt {
 /** @brief Event handler prototype. */
 typedef void (*esb_event_handler)(const struct esb_evt *event);
 
+/** ISR-accurate timestamp (in ticks) captured when PTX receives a valid ACK.
+ *  Written from RADIO ISR, read from application event handler.
+ *  Use for precise time-sync T4 on the tracker side. */
+extern volatile uint32_t esb_last_ack_rx_ticks;
+
 /** @brief ACK payload handler prototype.
  *
  *  Called from radio ISR context when a packet is received in PRX mode.

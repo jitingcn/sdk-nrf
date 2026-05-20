@@ -304,6 +304,10 @@ static volatile uint32_t retransmits_remaining;
 static volatile uint32_t last_tx_attempts;
 static volatile uint32_t wait_for_ack_timeout_us;
 
+/* ISR-accurate timestamp captured in RADIO ISR when PTX receives a valid ACK.
+ * Used by the tracker application for precise time-sync (T4 in PING/PONG). */
+volatile uint32_t esb_last_ack_rx_ticks;
+
 static uint32_t radio_shorts_common = RADIO_SHORTS_COMMON;
 static const bool fast_switching = IS_ENABLED(CONFIG_ESB_FAST_SWITCHING);
 
@@ -1490,6 +1494,10 @@ static void on_radio_disabled_tx_wait_for_ack(void)
 	}
 
 	if (ack_received) {
+		/* Capture ISR-accurate ACK reception timestamp for PTX time sync.
+		 * Written in RADIO ISR context, read from EVENT handler. */
+		esb_last_ack_rx_ticks = sys_clock_tick_get_32();
+
 		interrupt_flags |= INT_TX_SUCCESS_MSK;
 		last_tx_attempts = esb_cfg.retransmit_count - retransmits_remaining + 1;
 
@@ -1731,7 +1739,11 @@ static void on_radio_disabled_rx(void)
 	pipe_info->crc = nrf_radio_rxcrc_get(NRF_RADIO);
 
 	ack_requested = (esb_cfg.selective_auto_ack == false) || rx_pdu->type.dpl_pdu.no_ack;
-	if (ack_requested && esb_cfg.protocol == ESB_PROTOCOL_ESB_DPL) {
+	if (esb_cfg.protocol == ESB_PROTOCOL_ESB_DPL) {
+		/* Always call DPL handler so ack_handler runs for every received
+		 * packet (including NoACK data).  This lets the application capture
+		 * RADIO-ISR-accurate timestamps.  ACK TX is still gated by
+		 * ack_requested below, so NoACK packets won't send a response. */
 		on_radio_disabled_rx_dpl(retransmit_payload, pipe_info, &suppress_ack);
 	}
 
