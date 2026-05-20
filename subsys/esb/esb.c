@@ -68,6 +68,24 @@ LOG_MODULE_REGISTER(esb, CONFIG_ESB_LOG_LEVEL);
 /* Radio Rx fast ramp-up time in microseconds. */
 #define RX_FAST_RAMP_UP_TIME_US 40
 
+/*
+ * Inter-packet delay for consecutive noack TX (µs).
+ *
+ * The receiver (PRX) needs time to restart RX after each packet:
+ *   RADIO ISR (~15µs) + DISABLE (~6µs) + RX ramp-up
+ * The transmitter (PTX) inter-packet overhead is:
+ *   DISABLED ISR (~13µs) + TX ramp-up
+ *
+ * Required minimum delay:
+ *   delay > (ISR_rx + DISABLE + RX_ramp) - (ISR_tx + TX_ramp)
+ *
+ *   Fast ramp-up:   delay > (15 + 6 + 40) - (13 + 40)  =  8µs
+ *   Normal ramp-up: delay > (15 + 6 + 124) - (13 + 129) =  3µs
+ *
+ * 20µs provides comfortable margin for ISR timing variance.
+ */
+#define ESB_NOACK_INTERPACKET_DELAY_US 20
+
 /* Interrupt flags */
 /* Interrupt mask value for TX success. */
 #define INT_TX_SUCCESS_MSK BIT(0)
@@ -1365,6 +1383,16 @@ static void on_radio_end_tx_noack(void)
 	}
 }
 
+/* Timer callback for noack inter-packet delay.
+ * Called from esb_timer_handler when CC1 fires after the programmed delay.
+ */
+static void on_timer_noack_interpacket(void)
+{
+	nrf_timer_int_disable(esb_timer.p_reg,
+		nrf_timer_compare_int_get(NRF_TIMER_CC_CHANNEL1));
+	start_tx_transaction();
+}
+
 static void on_radio_disabled_tx_noack(void)
 {
 	esb_fem_pa_reset();
@@ -1379,7 +1407,18 @@ static void on_radio_disabled_tx_noack(void)
 		set_evt_interrupt();
 	} else {
 		set_evt_interrupt();
-		start_tx_transaction();
+		/*
+		 * Use ESB timer to delay the next TX, giving the receiver
+		 * time to restart RX.  See ESB_NOACK_INTERPACKET_DELAY_US.
+		 */
+		nrfx_timer_clear(&esb_timer);
+		nrf_timer_shorts_set(esb_timer.p_reg,
+			NRF_TIMER_SHORT_COMPARE1_STOP_MASK |
+			NRF_TIMER_SHORT_COMPARE1_CLEAR_MASK);
+		nrfx_timer_compare(&esb_timer, NRF_TIMER_CC_CHANNEL1,
+			ESB_NOACK_INTERPACKET_DELAY_US, true);
+		on_timer_compare1 = on_timer_noack_interpacket;
+		nrf_timer_task_trigger(esb_timer.p_reg, NRF_TIMER_TASK_START);
 	}
 }
 
