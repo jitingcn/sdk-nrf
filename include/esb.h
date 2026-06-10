@@ -46,7 +46,8 @@ extern "C" {
 		.tx_mode = ESB_TXMODE_AUTO,				       \
 		.payload_length = 32,					       \
 		.selective_auto_ack = false,                                   \
-		.use_fast_ramp_up = false                                      \
+		.use_fast_ramp_up = false,                                     \
+		.ack_handler = 0                                               \
 	}
 
 /** @brief Default legacy radio parameters.
@@ -66,7 +67,8 @@ extern "C" {
 		.tx_mode = ESB_TXMODE_AUTO,				       \
 		.payload_length = 32,					       \
 		.selective_auto_ack = false,                                   \
-		.use_fast_ramp_up = false                                      \
+		.use_fast_ramp_up = false,                                     \
+		.ack_handler = 0                                               \
 	}
 
 /** @brief Macro to create an initializer for a TX data packet.
@@ -310,6 +312,25 @@ struct esb_evt {
 /** @brief Event handler prototype. */
 typedef void (*esb_event_handler)(const struct esb_evt *event);
 
+/** ISR-accurate timestamp (in ticks) captured when PTX receives a valid ACK.
+ *  Written from RADIO ISR, read from application event handler.
+ *  Use for precise time-sync T4 on the tracker side.
+ */
+extern volatile uint32_t esb_last_ack_rx_ticks;
+
+/** @brief ACK payload handler prototype.
+ *
+ *  Called from radio ISR context when a packet is received in PRX mode.
+ *  Must be lightweight (no blocking, no logging).
+ *
+ *  @p has_ack_payload and @p suppress_ack must be valid pointers.
+ *  Set @p has_ack_payload to true to attach an ACK payload.
+ *  Set @p suppress_ack to true to suppress the link-layer ACK entirely.
+ */
+typedef void (*esb_ack_handler)(const uint8_t *pdu_data, uint8_t data_length,
+				uint32_t pipe_id, struct esb_payload *ack_payload,
+				bool *has_ack_payload, bool *suppress_ack);
+
 /** @brief Main configuration structure for the module. */
 struct esb_config {
 	enum esb_protocol protocol;		/**< Protocol. */
@@ -354,6 +375,7 @@ struct esb_config {
 				 *  between nRF52 and/or nRF53 Series devices, this delay can
 				 *  be reduced to 40 µs.
 				 */
+	esb_ack_handler ack_handler;	/**< ACK handler. */
 };
 
 /** @brief Initialize the Enhanced ShockBurst module.
