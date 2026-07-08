@@ -11,6 +11,11 @@ set(NRF_DIR ${CMAKE_CURRENT_LIST_DIR} CACHE PATH "NCS root directory")
 # is cached.
 set(CONF_FILE_BUILD_TYPE ${CONF_FILE_BUILD_TYPE} CACHE INTERNAL "The build type")
 
+option(SLIMENRF_APPLY_ZEPHYR_PATCHES "Apply SlimeNRF-maintained Zephyr patches" ON)
+if(SLIMENRF_APPLY_ZEPHYR_PATCHES)
+  include(${CMAKE_CURRENT_LIST_DIR}/cmake/slimenrf_apply_zephyr_patches.cmake)
+endif()
+
 foreach(runner_ext BIN HEX ELF)
   zephyr_get(NCS_RUNNER_${runner_ext} SYSBUILD)
   if(DEFINED NCS_RUNNER_${runner_ext})
