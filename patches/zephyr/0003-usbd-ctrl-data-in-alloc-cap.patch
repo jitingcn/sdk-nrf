@@ -1,0 +1,44 @@
+diff --git a/include/zephyr/usb/usbd.h b/include/zephyr/usb/usbd.h
+index bca3eb1104b..6ba4f040a66 100644
+--- a/include/zephyr/usb/usbd.h
++++ b/include/zephyr/usb/usbd.h
+@@ -43,6 +43,19 @@ extern "C" {
+ /* Maximum bulk max packet size the stack supports */
+ #define USBD_MAX_BULK_MPS COND_CODE_1(USBD_SUPPORTS_HIGH_SPEED, (512), (64))
+ 
++/*
++ * Upper bound for the control transfer data-IN stage buffer allocation.
++ *
++ * Hosts may request descriptors with a large wLength (e.g. 4095 for the
++ * BOS descriptor) to learn the actual size. The stack answers with the
++ * real descriptor length (see sreq_get_desc_*), which never exceeds 512
++ * bytes for any standard, class or vendor descriptor supported here, so
++ * allocating wLength bytes upfront wastes the shared UDC buffer pool and
++ * can fail with -ENOMEM on a busy pool (setup + CDC bulk buffers), which
++ * stalls enumeration. Cap the allocation at 512 bytes.
++ */
++#define USBD_CTRL_DATA_IN_MAX 512U
++
+ /*
+  * The length of the string descriptor (bLength) is calculated from the
+  * size of the two octets bLength and bDescriptorType plus the
+diff --git a/subsys/usb/device_next/usbd_endpoint.c b/subsys/usb/device_next/usbd_endpoint.c
+index 0023604847b..5d7f2304534 100644
+--- a/subsys/usb/device_next/usbd_endpoint.c
++++ b/subsys/usb/device_next/usbd_endpoint.c
+@@ -102,7 +102,14 @@ static void usbd_ep_ctrl_set_zlp(struct usbd_context *const uds_ctx,
+ struct net_buf *usbd_ep_ctrl_data_in_alloc(const struct usbd_context *const uds_ctx,
+ 					   const size_t size)
+ {
+-	return udc_ctrl_data_alloc(uds_ctx->dev, USB_CONTROL_EP_IN, size);
++	/*
++	 * Cap the allocation: hosts may query descriptors with a large
++	 * wLength (e.g. 4095 for BOS), but the stack never answers with
++	 * more than USBD_CTRL_DATA_IN_MAX bytes. Allocating wLength bytes
++	 * can exhaust the shared UDC buffer pool and stall enumeration.
++	 */
++	return udc_ctrl_data_alloc(uds_ctx->dev, USB_CONTROL_EP_IN,
++				   MIN(size, USBD_CTRL_DATA_IN_MAX));
+ }
+ 
+ int usbd_ep_ctrl_enqueue(struct usbd_context *const uds_ctx,
