@@ -267,6 +267,7 @@ static uint32_t errata_216_timer_shorts;
 
 static esb_event_handler event_handler;
 static esb_ack_handler ack_handler;
+static esb_tx_capture_handler tx_capture_handler;
 static struct esb_payload *current_payload;
 static struct esb_payload ack_payload;
 
@@ -291,6 +292,11 @@ static volatile uint32_t retransmits_remaining;
 static volatile uint32_t last_tx_attempts;
 static volatile uint32_t wait_for_ack_timeout_us;
 volatile uint32_t esb_last_ack_rx_ticks;
+static atomic_t rx_crc_failures;
+static atomic_t rx_fifo_full;
+static atomic_t rx_invalid_payload_length;
+static atomic_t rx_duplicates;
+
 
 static const bool fast_switching = IS_ENABLED(CONFIG_ESB_FAST_SWITCHING);
 
@@ -1287,11 +1293,13 @@ static bool rx_fifo_push_rfbuf(uint8_t pipe, uint8_t pid)
 	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
 
 	if (atomic_get(&rx_fifo.count) >= CONFIG_ESB_RX_FIFO_SIZE) {
+		atomic_inc(&rx_fifo_full);
 		return false;
 	}
 
 	if (esb_cfg.protocol == ESB_PROTOCOL_ESB_DPL) {
 		if (rx_pdu->type.dpl_pdu.length > CONFIG_ESB_MAX_PAYLOAD_LENGTH) {
+			atomic_inc(&rx_invalid_payload_length);
 			return false;
 		}
 
@@ -1455,6 +1463,11 @@ static void start_tx_transaction(void)
 	struct esb_radio_pdu *pdu = (struct esb_radio_pdu *)tx_payload_buffer;
 	/* Prepare the payload */
 	current_payload = tx_fifo.payload[tx_fifo.front];
+	if (tx_capture_handler && current_payload && !current_payload->noack) {
+		tx_capture_handler(
+			current_payload->data[0], current_payload->length, false, 0, false, true
+		);
+	}
 
 	switch (esb_cfg.protocol) {
 	case ESB_PROTOCOL_ESB:
@@ -1614,7 +1627,9 @@ static void on_radio_disabled_tx_noack(void)
 {
 	esb_fem_pa_reset();
 	esb_ppi_for_txrx_clear(false, false);
-
+	if (tx_capture_handler && current_payload) {
+		tx_capture_handler(current_payload->data[0], current_payload->length, true, 1, true, false);
+	}
 	last_tx_attempts = 1;
 	atomic_set_bit(&interrupt_flags, ESB_EVENT_TX_SUCCESS);
 	tx_fifo_remove_first();
@@ -1854,7 +1869,7 @@ static void on_radio_disabled_tx_wait_for_ack(void)
 	 * received.
 	 */
 	esb_ppi_for_wait_for_ack_clear();
-
+	/* ACK transaction capture is emitted only after final success/failure below. */
 	/* Just clear LNA configuration and disable front-end module. */
 	mpsl_fem_lna_configuration_clear();
 	mpsl_fem_disable();
@@ -1871,8 +1886,14 @@ static void on_radio_disabled_tx_wait_for_ack(void)
 	}
 
 	if (ack_received) {
-		atomic_set_bit(&interrupt_flags, ESB_EVENT_TX_SUCCESS);
 		last_tx_attempts = esb_cfg.retransmit_count - retransmits_remaining + 1;
+		if (tx_capture_handler && current_payload) {
+			tx_capture_handler(
+				current_payload->data[0], current_payload->length, false,
+				(uint8_t)last_tx_attempts, true, false
+			);
+		}
+		atomic_set_bit(&interrupt_flags, ESB_EVENT_TX_SUCCESS);
 		esb_last_ack_rx_ticks = sys_clock_tick_get_32();
 
 		tx_fifo_remove_first();
@@ -1927,6 +1948,12 @@ static void on_radio_disabled_tx_wait_for_ack(void)
 #endif
 
 		last_tx_attempts = esb_cfg.retransmit_count + 1;
+		if (tx_capture_handler && current_payload) {
+			tx_capture_handler(
+				current_payload->data[0], current_payload->length, false,
+				(uint8_t)last_tx_attempts, false, false
+			);
+		}
 		atomic_set_bit(&interrupt_flags, ESB_EVENT_TX_FAILED);
 
 		esb_state = ESB_STATE_IDLE;
@@ -2162,11 +2189,13 @@ static void on_radio_disabled_rx(void)
 	struct esb_radio_pdu *tx_pdu = (struct esb_radio_pdu *)tx_payload_buffer;
 
 	if (!nrf_radio_crc_status_check(NRF_RADIO)) {
+		atomic_inc(&rx_crc_failures);
 		clear_events_restart_rx();
 		return;
 	}
 
 	if (atomic_get(&rx_fifo.count) >= CONFIG_ESB_RX_FIFO_SIZE) {
+		atomic_inc(&rx_fifo_full);
 		clear_events_restart_rx();
 		return;
 	}
@@ -2176,6 +2205,7 @@ static void on_radio_disabled_rx(void)
 	if ((nrf_radio_rxcrc_get(NRF_RADIO) == pipe_info->crc) &&
 	    (rx_pdu->type.dpl_pdu.pid) == pipe_info->pid) {
 		retransmit_payload = true;
+		atomic_inc(&rx_duplicates);
 		send_rx_event = false;
 	}
 
@@ -2472,6 +2502,7 @@ int esb_init(const struct esb_config *config)
 
 	event_handler = config->event_handler;
 	ack_handler = config->ack_handler;
+	tx_capture_handler = config->tx_capture_handler;
 
 	memcpy(&esb_cfg, config, sizeof(esb_cfg));
 
@@ -2615,6 +2646,11 @@ int esb_init(const struct esb_config *config)
 		irq_enable(ESB_RADIO_IRQ_NUMBER);
 		irq_enable(ESB_TIMER_IRQ);
 	}
+
+	atomic_clear(&rx_crc_failures);
+	atomic_clear(&rx_fifo_full);
+	atomic_clear(&rx_invalid_payload_length);
+	atomic_clear(&rx_duplicates);
 
 	return 0;
 }
@@ -2838,6 +2874,23 @@ int esb_write_payload(const struct esb_payload *payload)
 	     (IS_ENABLED(CONFIG_ESB_NEVER_DISABLE_TX) && esb_state == ESB_STATE_PTX_TXIDLE))) {
 		schedule_tx_transaction();
 	}
+
+	return 0;
+}
+
+int esb_get_rx_diagnostics(struct esb_rx_diagnostics *diagnostics)
+{
+	if (esb_state == ESB_STATE_UNINITIALIZED) {
+		return -EACCES;
+	}
+	if (diagnostics == NULL) {
+		return -EINVAL;
+	}
+
+	diagnostics->crc_failures = (uint32_t)atomic_get(&rx_crc_failures);
+	diagnostics->rx_fifo_full = (uint32_t)atomic_get(&rx_fifo_full);
+	diagnostics->invalid_payload_length = (uint32_t)atomic_get(&rx_invalid_payload_length);
+	diagnostics->duplicates = (uint32_t)atomic_get(&rx_duplicates);
 
 	return 0;
 }
