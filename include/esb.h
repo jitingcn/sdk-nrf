@@ -47,7 +47,8 @@ extern "C" {
 		.payload_length = 32,					       \
 		.selective_auto_ack = false,                                   \
 		.use_fast_ramp_up = false,                                     \
-		.ack_handler = 0                                               \
+		.ack_handler = 0,                                              \
+		.tx_capture_handler = 0                                        \
 	}
 
 /** @brief Default legacy radio parameters.
@@ -68,7 +69,8 @@ extern "C" {
 		.payload_length = 32,					       \
 		.selective_auto_ack = false,                                   \
 		.use_fast_ramp_up = false,                                     \
-		.ack_handler = 0                                               \
+		.ack_handler = 0,                                              \
+		.tx_capture_handler = 0                                        \
 	}
 
 /** @brief Macro to create an initializer for a TX data packet.
@@ -314,6 +316,29 @@ struct esb_evt {
 /** @brief Event handler prototype. */
 typedef void (*esb_event_handler)(const struct esb_evt *event);
 
+/** @brief Optional hook called at TX transaction start and final completion. */
+typedef void (*esb_tx_capture_handler)(
+	uint8_t payload_type,
+	uint8_t payload_length,
+	bool no_ack,
+	uint8_t attempts,
+	bool success,
+	bool transaction_start
+);
+
+/** @brief PRX receive diagnostics since the last successful @ref esb_init.
+ *
+ * Counters wrap modulo 2^32 and are not reset by FIFO flushes. Fields are
+ * sampled independently, so a snapshot can span an in-flight radio event.
+ */
+struct esb_rx_diagnostics {
+	uint32_t crc_failures;
+	uint32_t rx_fifo_full;
+	uint32_t invalid_payload_length;
+	uint32_t duplicates;
+};
+
+
 /** ISR-accurate timestamp (in ticks) captured when PTX receives a valid ACK.
  *  Written from RADIO ISR, read from application event handler.
  *  Use for precise time-sync T4 on the tracker side.
@@ -338,6 +363,7 @@ struct esb_config {
 	enum esb_protocol protocol;		/**< Protocol. */
 	enum esb_mode mode;			/**< Mode. */
 	esb_event_handler event_handler;	/**< Event handler. */
+	esb_tx_capture_handler tx_capture_handler; /**< Optional hardware timestamp drain hook. */
 	/* General RF parameters */
 	enum esb_bitrate bitrate;		/**< Bitrate mode. */
 	enum esb_crc crc;			/**< CRC mode. */
@@ -436,6 +462,17 @@ int esb_write_payload(const struct esb_payload *payload);
  *           Otherwise, a (negative) error code is returned.
  */
 int esb_read_rx_payload(struct esb_payload *payload);
+
+/** @brief Copy PRX receive diagnostics since the last successful @ref esb_init.
+ *
+ * @param[out] diagnostics Destination snapshot.
+ *
+ * @retval 0 If successful.
+ * @retval -EACCES If ESB is not initialized.
+ * @retval -EINVAL If @p diagnostics is NULL.
+ */
+int esb_get_rx_diagnostics(struct esb_rx_diagnostics *diagnostics);
+
 
 /** @brief Start transmitting data.
  *
