@@ -23,7 +23,7 @@ index b75705d1..3cb945a9 100644
  		cdc_acm_update_linestate(data);
  		usbd_msg_pub_device(uds_ctx, USBD_MSG_CDC_ACM_CONTROL_LINE_STATE, dev);
 +		if (atomic_test_bit(&data->state, CDC_ACM_IRQ_RX_ENABLED)) {
-+			atomic_clear_bit(&data->state, CDC_ACM_RX_FIFO_BUSY);
++			/* Keep BUSY until the pending OUT transfer completes. */
 +			cdc_acm_work_submit(&data->rx_fifo_work);
 +		}
  		return 0;
