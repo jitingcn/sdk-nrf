@@ -1,8 +1,8 @@
 find_package(Git REQUIRED)
 
-set(SLIMENRF_ZEPHYR_BASE "$ENV{ZEPHYR_BASE}")
-if(NOT SLIMENRF_ZEPHYR_BASE AND DEFINED ZEPHYR_BASE)
-  set(SLIMENRF_ZEPHYR_BASE "${ZEPHYR_BASE}")
+set(SLIMENRF_ZEPHYR_BASE "${ZEPHYR_BASE}")
+if(NOT SLIMENRF_ZEPHYR_BASE)
+  set(SLIMENRF_ZEPHYR_BASE "$ENV{ZEPHYR_BASE}")
 endif()
 
 if(NOT SLIMENRF_ZEPHYR_BASE)
@@ -13,6 +13,7 @@ set(SLIMENRF_ZEPHYR_PATCHES
   "${CMAKE_CURRENT_LIST_DIR}/../patches/zephyr/0001-usbd-cdc-acm-reprime-rx-after-stale-busy.patch"
   "${CMAKE_CURRENT_LIST_DIR}/../patches/zephyr/0002-usbd-cdc-acm-bdatainterface-per-instance.patch"
   "${CMAKE_CURRENT_LIST_DIR}/../patches/zephyr/0003-usbd-ctrl-data-in-alloc-cap.patch"
+  "${CMAKE_CURRENT_LIST_DIR}/../patches/zephyr/0004-uf2-prefer-hex-output.patch"
 )
 
 foreach(patch_file IN LISTS SLIMENRF_ZEPHYR_PATCHES)
