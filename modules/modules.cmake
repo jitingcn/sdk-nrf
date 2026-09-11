@@ -1,3 +1,10 @@
+# Apply before Zephyr's root CMakeLists.txt is parsed, including first sysbuild configure.
+option(SLIMENRF_APPLY_ZEPHYR_PATCHES "Apply SlimeNRF-maintained Zephyr patches" ON)
+zephyr_get(SLIMENRF_APPLY_ZEPHYR_PATCHES SYSBUILD GLOBAL)
+if(SLIMENRF_APPLY_ZEPHYR_PATCHES)
+  include(${CMAKE_CURRENT_LIST_DIR}/../cmake/slimenrf_apply_zephyr_patches.cmake)
+endif()
+
 set(ZEPHYR_MCUBOOT_CMAKE_DIR  ${CMAKE_CURRENT_LIST_DIR}/mcuboot)
 set(ZEPHYR_MCUBOOT_KCONFIG    ${CMAKE_CURRENT_LIST_DIR}/mcuboot/Kconfig)
 set(ZEPHYR_NRFXLIB_CMAKE_DIR  ${CMAKE_CURRENT_LIST_DIR}/nrfxlib)

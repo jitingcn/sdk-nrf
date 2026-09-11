@@ -1,0 +1,84 @@
+From 0953b38b84d75f1ec1c6c30eddf068cc62143a24 Mon Sep 17 00:00:00 2001
+From: Perry Naseck <pnaseck@media.mit.edu>
+Date: Sat, 25 Apr 2026 13:15:21 -0400
+Subject: [PATCH] flashing: Fix UF2 builds for mapped-partition
+
+This commit enables HEX builds for UF2 to ensure images can be made when
+using mapped-partitions. HEX builds are now preferred over BIN for UF2.
+
+Upstream: https://github.com/zephyrproject-rtos/zephyr/pull/107944
+Backport: retain the functional changes; omit the Zephyr 4.5 migration
+note from this NCS 3.4.0 / Zephyr 4.4.0 tree.
+
+Signed-off-by: Perry Naseck <pnaseck@media.mit.edu>
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4feb2fd983d7..bb98344ee51e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1865,7 +1865,7 @@ if(CONFIG_BUILD_OUTPUT_BIN)
+   endif()
+ endif()
+ 
+-if(CONFIG_BUILD_OUTPUT_BIN AND CONFIG_BUILD_OUTPUT_UF2)
++if(CONFIG_BUILD_OUTPUT_UF2)
+   if(CONFIG_BUILD_OUTPUT_UF2_USE_FLASH_BASE)
+     set(code_address "${CONFIG_FLASH_BASE_ADDRESS}")
+   else()
+@@ -1909,15 +1909,34 @@ if(CONFIG_BUILD_OUTPUT_BIN AND CONFIG_BUILD_OUTPUT_UF2)
+     endif()
+   endif()
+ 
+-  list(APPEND
+-    post_build_commands
+-    COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_BASE}/scripts/build/uf2conv.py
+-            -c
+-            -f ${CONFIG_BUILD_OUTPUT_UF2_FAMILY_ID}
+-            -b ${code_address}
+-            -o ${KERNEL_UF2_NAME}
+-            ${KERNEL_BIN_NAME}
+-  )
++  if(CONFIG_BUILD_OUTPUT_HEX)
++    # HEX format embeds addresses, so no -b flag is needed.
++    # This method is required for mapped-partition.
++    list(APPEND
++      post_build_commands
++      COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_BASE}/scripts/build/uf2conv.py
++              -c
++              -f ${CONFIG_BUILD_OUTPUT_UF2_FAMILY_ID}
++              -o ${KERNEL_UF2_NAME}
++              ${KERNEL_HEX_NAME}
++    )
++  elseif(CONFIG_BUILD_OUTPUT_BIN AND NOT "${code_address}" STREQUAL "")
++    # BIN format requires an explicit base address via -b.
++    list(APPEND
++      post_build_commands
++      COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_BASE}/scripts/build/uf2conv.py
++              -c
++              -f ${CONFIG_BUILD_OUTPUT_UF2_FAMILY_ID}
++              -b ${code_address}
++              -o ${KERNEL_UF2_NAME}
++              ${KERNEL_BIN_NAME}
++    )
++  else()
++    message(WARNING
++      "UF2 output requires either a) CONFIG_BUILD_OUTPUT_HEX or b) CONFIG_BUILD_OUTPUT_BIN with a "
++      "known code address. Enable CONFIG_BUILD_OUTPUT_HEX in your board configuration.")
++  endif()
++
+   list(APPEND
+     post_build_byproducts
+     ${KERNEL_UF2_NAME}
+diff --git a/Kconfig.zephyr b/Kconfig.zephyr
+index 64107a804a19..1fb2698c9446 100644
+--- a/Kconfig.zephyr
++++ b/Kconfig.zephyr
+@@ -884,7 +884,7 @@ config BUILD_OUTPUT_VERILOG_DATA_WIDTH
+ 
+ config BUILD_OUTPUT_UF2
+ 	bool "Build a binary in UF2 format"
+-	depends on BUILD_OUTPUT_BIN
++	depends on BUILD_OUTPUT_BIN || BUILD_OUTPUT_HEX
+ 	help
+ 	  Build a UF2 binary zephyr/zephyr.uf2 in the build directory.
+ 	  The name of this file can be customized with CONFIG_KERNEL_BIN_NAME.
