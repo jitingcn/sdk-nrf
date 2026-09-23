@@ -1,0 +1,73 @@
+diff --git a/drivers/led_strip/ws2812_i2s.c b/drivers/led_strip/ws2812_i2s.c
+index 59e982b7d62..a54f00cdb11 100644
+--- a/drivers/led_strip/ws2812_i2s.c
++++ b/drivers/led_strip/ws2812_i2s.c
+@@ -166,6 +166,42 @@ static int ws2812_strip_update(const struct ws2812_i2s_cfg *cfg, void **mem_bloc
+ 	return ret;
+ }
+ 
++/*
++ * Allocate a TX block for a new frame.
++ *
++ * The slab holds two blocks, which is the minimum the I2S API requires for a
++ * queue, and the driver releases a block only once it has been transmitted (or
++ * dropped). Taking both blocks and returning the second one immediately
++ * therefore waits for the previous frame to complete; relying on the transfer
++ * time alone leaves a window in which the next frame is queued while the
++ * previous one is still being drained.
++ */
++static int ws2812_i2s_acquire_tx_buffer(const struct ws2812_i2s_cfg *cfg, void **mem_block)
++{
++	void *barrier_block;
++	int ret;
++
++	*mem_block = NULL;
++
++	ret = k_mem_slab_alloc(cfg->mem_slab, mem_block, K_SECONDS(10));
++	if (ret < 0) {
++		LOG_ERR("Unable to allocate mem slab for TX (err %d)", ret);
++		return -ENOMEM;
++	}
++
++	ret = k_mem_slab_alloc(cfg->mem_slab, &barrier_block, K_SECONDS(1));
++	if (ret < 0) {
++		k_mem_slab_free(cfg->mem_slab, *mem_block);
++		*mem_block = NULL;
++		LOG_ERR("Previous LED strip frame did not complete (err %d)", ret);
++		return -EBUSY;
++	}
++
++	k_mem_slab_free(cfg->mem_slab, barrier_block);
++
++	return 0;
++}
++
+ /*
+  * Convert pixel data into I2S frames. Each frame has pixel data in color
+  * mapping on-wire format (e.g. GRB, GRBW, RGB, etc). The block is allocated by
+@@ -222,10 +258,9 @@ static int ws2812_i2s_update_rgb(const struct device *dev, struct led_rgb *pixel
+ 	 * attempt needs a freshly allocated and filled frame.
+ 	 */
+ 	for (uint8_t attempt = 0; attempt <= WS2812_I2S_RETRY_COUNT; attempt++) {
+-		ret = k_mem_slab_alloc(cfg->mem_slab, &mem_block, K_SECONDS(10));
++		ret = ws2812_i2s_acquire_tx_buffer(cfg, &mem_block);
+ 		if (ret < 0) {
+-			LOG_ERR("Unable to allocate mem slab for TX (err %d)", ret);
+-			return -ENOMEM;
++			return ret;
+ 		}
+ 
+ 		ret = ws2812_i2s_fill_rgb(cfg, pixels, num_pixels, mem_block);
+@@ -294,10 +329,9 @@ static int ws2812_i2s_update_channels(const struct device *dev, uint8_t *channel
+ 	 * attempt needs a freshly allocated and filled frame.
+ 	 */
+ 	for (uint8_t attempt = 0; attempt <= WS2812_I2S_RETRY_COUNT; attempt++) {
+-		ret = k_mem_slab_alloc(cfg->mem_slab, &mem_block, K_SECONDS(10));
++		ret = ws2812_i2s_acquire_tx_buffer(cfg, &mem_block);
+ 		if (ret < 0) {
+-			LOG_ERR("Unable to allocate mem slab for TX (err %d)", ret);
+-			return -ENOMEM;
++			return ret;
+ 		}
+ 
+ 		ws2812_i2s_fill_channels(cfg, channels, num_channels, mem_block);
