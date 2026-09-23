@@ -1,0 +1,24 @@
+diff --git a/drivers/led_strip/ws2812_i2s.c b/drivers/led_strip/ws2812_i2s.c
+index 6600a8d..4bf1386 100644
+--- a/drivers/led_strip/ws2812_i2s.c
++++ b/drivers/led_strip/ws2812_i2s.c
+@@ -29,7 +29,18 @@ LOG_MODULE_REGISTER(ws2812_i2s);
+ #include <zephyr/kernel.h>
+ #include <zephyr/sys/util.h>
+ 
+-#define WS2812_I2S_PRE_DELAY_WORDS 1
++/*
++ * Pre-data reset words.
++ *
++ * The strip latches its input after the data line has been low for more than
++ * ~80 us, which is the only thing that guarantees a frame starts at a known
++ * bit position: the LED supply is gated (led-en-gpios) and is switched on while
++ * a frame may already be on the wire, and the line is inverted by the level
++ * shifter, so a single word (10 us) leaves the first frame after a supply
++ * transition undecodable and the pixel shows an undefined color. Ten words
++ * (100 us) clear the latch state before the first bit.
++ */
++#define WS2812_I2S_PRE_DELAY_WORDS 10
+ #define WS2812_I2S_RETRY_COUNT 1
+ 
+ /*
