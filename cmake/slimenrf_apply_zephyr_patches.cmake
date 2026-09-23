@@ -34,6 +34,7 @@ set(SLIMENRF_ZEPHYR_PATCHES
   "${CMAKE_CURRENT_LIST_DIR}/../patches/zephyr/0009-led-strip-ws2812-i2s-wait-for-previous-frame.patch"
   "${CMAKE_CURRENT_LIST_DIR}/../patches/zephyr/0010-led-strip-ws2812-spi-reject-oversized-updates.patch"
   "${CMAKE_CURRENT_LIST_DIR}/../patches/zephyr/0011-led-strip-ws2812-spi-serialize-updates.patch"
+  "${CMAKE_CURRENT_LIST_DIR}/../patches/zephyr/0012-led-strip-ws2812-i2s-bound-the-tx-waits.patch"
 )
 
 set(slimenrf_patch_args)

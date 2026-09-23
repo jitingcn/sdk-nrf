@@ -1,0 +1,77 @@
+diff --git a/drivers/led_strip/ws2812_i2s.c b/drivers/led_strip/ws2812_i2s.c
+index a54f00c..15a967c 100644
+--- a/drivers/led_strip/ws2812_i2s.c
++++ b/drivers/led_strip/ws2812_i2s.c
+@@ -114,10 +114,18 @@ static inline bool ws2812_i2s_retryable(int err)
+ 	return (err == -EIO) || (err == -EAGAIN);
+ }
+ 
++/*
++ * Time one frame needs on the wire: one 32-bit word per LRCK period, covering
++ * the pre-data and post-data reset words.
++ */
++static uint32_t ws2812_i2s_frame_time_us(const struct ws2812_i2s_cfg *cfg)
++{
++	return cfg->lrck_period * (cfg->tx_buf_bytes / sizeof(uint32_t));
++}
++
+ static int ws2812_strip_update(const struct ws2812_i2s_cfg *cfg, void **mem_block, size_t size)
+ {
+ 	uint32_t *frame = *mem_block;
+-	uint32_t flush_time_us;
+ 	int ret;
+ 
+ 	/* Add a pre-data reset, so the first pixel isn't skipped by the strip. */
+@@ -160,8 +168,7 @@ static int ws2812_strip_update(const struct ws2812_i2s_cfg *cfg, void **mem_bloc
+ 	}
+ 
+ 	/* Wait until transaction is over */
+-	flush_time_us = cfg->lrck_period * cfg->tx_buf_bytes / sizeof(uint32_t);
+-	k_usleep(flush_time_us + cfg->extra_wait_time_us);
++	k_usleep(ws2812_i2s_frame_time_us(cfg) + cfg->extra_wait_time_us);
+ 
+ 	return ret;
+ }
+@@ -175,21 +182,26 @@ static int ws2812_strip_update(const struct ws2812_i2s_cfg *cfg, void **mem_bloc
+  * therefore waits for the previous frame to complete; relying on the transfer
+  * time alone leaves a window in which the next frame is queued while the
+  * previous one is still being drained.
++ *
++ * Both waits are bounded by the time one frame needs on the wire: a block that
++ * is still busy cannot be released later than that, so waiting longer would
++ * only stall the caller without being able to succeed.
+  */
+ static int ws2812_i2s_acquire_tx_buffer(const struct ws2812_i2s_cfg *cfg, void **mem_block)
+ {
++	uint32_t wait_us = ws2812_i2s_frame_time_us(cfg) + cfg->extra_wait_time_us;
+ 	void *barrier_block;
+ 	int ret;
+ 
+ 	*mem_block = NULL;
+ 
+-	ret = k_mem_slab_alloc(cfg->mem_slab, mem_block, K_SECONDS(10));
++	ret = k_mem_slab_alloc(cfg->mem_slab, mem_block, K_USEC(wait_us));
+ 	if (ret < 0) {
+ 		LOG_ERR("Unable to allocate mem slab for TX (err %d)", ret);
+ 		return -ENOMEM;
+ 	}
+ 
+-	ret = k_mem_slab_alloc(cfg->mem_slab, &barrier_block, K_SECONDS(1));
++	ret = k_mem_slab_alloc(cfg->mem_slab, &barrier_block, K_USEC(wait_us));
+ 	if (ret < 0) {
+ 		k_mem_slab_free(cfg->mem_slab, *mem_block);
+ 		*mem_block = NULL;
+@@ -397,7 +409,12 @@ static int ws2812_i2s_init(const struct device *dev)
+ 	config.frame_clk_freq = lrck_hz; /* WS (or LRCK) */
+ 	config.mem_slab = cfg->mem_slab;
+ 	config.block_size = cfg->tx_buf_bytes;
+-	config.timeout = 1000;
++	/*
++	 * The update path holds every slab block while it writes, so the driver
++	 * queue cannot fill up behind it. Report a full queue as -EAGAIN for the
++	 * caller to retry instead of blocking here for up to a second.
++	 */
++	config.timeout = 0;
+ 
+ 	ret = i2s_configure(cfg->dev, I2S_DIR_TX, &config);
+ 	if (ret < 0) {
