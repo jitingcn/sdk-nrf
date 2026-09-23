@@ -1,0 +1,243 @@
+diff --git a/drivers/led_strip/ws2812_i2s.c b/drivers/led_strip/ws2812_i2s.c
+index f7252078ab2..59e982b7d62 100644
+--- a/drivers/led_strip/ws2812_i2s.c
++++ b/drivers/led_strip/ws2812_i2s.c
+@@ -30,6 +30,7 @@ LOG_MODULE_REGISTER(ws2812_i2s);
+ #include <zephyr/sys/util.h>
+ 
+ #define WS2812_I2S_PRE_DELAY_WORDS 1
++#define WS2812_I2S_RETRY_COUNT 1
+ 
+ struct ws2812_i2s_cfg {
+ 	struct device const *dev;
+@@ -102,9 +103,20 @@ static void ws2812_i2s_recover(const struct ws2812_i2s_cfg *cfg)
+ 	}
+ }
+ 
+-static int ws2812_strip_update(const struct ws2812_i2s_cfg *cfg, void *mem_block, size_t size)
++/*
++ * The I2S API reports -EIO when a trigger is not allowed in the current state
++ * and -EAGAIN when the TX queue stays full; both mean the frame can be sent
++ * again once the stream has been recovered. Every other errno (for example
++ * -EINVAL for a request the driver rejects) is passed to the caller unchanged.
++ */
++static inline bool ws2812_i2s_retryable(int err)
++{
++	return (err == -EIO) || (err == -EAGAIN);
++}
++
++static int ws2812_strip_update(const struct ws2812_i2s_cfg *cfg, void **mem_block, size_t size)
+ {
+-	uint32_t *frame = mem_block;
++	uint32_t *frame = *mem_block;
+ 	uint32_t flush_time_us;
+ 	int ret;
+ 
+@@ -114,19 +126,25 @@ static int ws2812_strip_update(const struct ws2812_i2s_cfg *cfg, void *mem_block
+ 	}
+ 
+ 	/* Add post-data reset */
+-	frame = (uint32_t *)mem_block + WS2812_I2S_PRE_DELAY_WORDS + size;
++	frame = (uint32_t *)*mem_block + WS2812_I2S_PRE_DELAY_WORDS + size;
+ 	for (uint16_t i = 0; i < cfg->reset_words; i++) {
+ 		frame[i] = ws2812_i2s_reset_word(cfg);
+ 	}
+ 
+ 	/* Flush the buffer on the wire. */
+-	ret = i2s_write(cfg->dev, mem_block, cfg->tx_buf_bytes);
++	ret = i2s_write(cfg->dev, *mem_block, cfg->tx_buf_bytes);
+ 	if (ret < 0) {
+-		k_mem_slab_free(cfg->mem_slab, mem_block);
+ 		LOG_ERR("Failed to write data: %d", ret);
+ 		return ret;
+ 	}
+ 
++	/*
++	 * The I2S driver owns the memory block from here on. It releases it when
++	 * the frame has been transmitted or when the queue is dropped, so the
++	 * caller must not free it anymore.
++	 */
++	*mem_block = NULL;
++
+ 	ret = i2s_trigger(cfg->dev, I2S_DIR_TX, I2S_TRIGGER_START);
+ 	if (ret < 0) {
+ 		LOG_ERR("Failed to trigger command %d on TX: %d", I2S_TRIGGER_START, ret);
+@@ -148,30 +166,17 @@ static int ws2812_strip_update(const struct ws2812_i2s_cfg *cfg, void *mem_block
+ 	return ret;
+ }
+ 
+-static int ws2812_i2s_update_rgb(const struct device *dev, struct led_rgb *pixels,
+-				 size_t num_pixels)
++/*
++ * Convert pixel data into I2S frames. Each frame has pixel data in color
++ * mapping on-wire format (e.g. GRB, GRBW, RGB, etc). The block is allocated by
++ * the caller and initially holds the encoded pixels only; the reset words are
++ * added by the transmit step.
++ */
++static int ws2812_i2s_fill_rgb(const struct ws2812_i2s_cfg *cfg, struct led_rgb *pixels,
++			       size_t num_pixels, void *mem_block)
+ {
+-	const struct ws2812_i2s_cfg *cfg = dev->config;
+-	void *mem_block;
+-	uint32_t *frame;
+-	int ret;
+-
+-	/* The TX buffer is sized for the strip length from devicetree. */
+-	if (num_pixels > cfg->length) {
+-		return -EINVAL;
+-	}
++	uint32_t *frame = ws2812_get_first_data_frame(mem_block);
+ 
+-	ret = k_mem_slab_alloc(cfg->mem_slab, &mem_block, K_SECONDS(10));
+-	if (ret < 0) {
+-		LOG_ERR("Unable to allocate mem slab for TX (err %d)", ret);
+-		return -ENOMEM;
+-	}
+-
+-	/*
+-	 * Convert pixel data into I2S frames. Each frame has pixel data
+-	 * in color mapping on-wire format (e.g. GRB, GRBW, RGB, etc).
+-	 */
+-	frame = ws2812_get_first_data_frame(mem_block);
+ 	for (uint16_t i = 0; i < num_pixels; i++) {
+ 		for (uint16_t j = 0; j < cfg->num_colors; j++) {
+ 			uint8_t pixel;
+@@ -191,14 +196,61 @@ static int ws2812_i2s_update_rgb(const struct device *dev, struct led_rgb *pixel
+ 				pixel = pixels[i].b;
+ 				break;
+ 			default:
+-				k_mem_slab_free(cfg->mem_slab, mem_block);
+ 				return -EINVAL;
+ 			}
+ 			*frame++ = ws2812_i2s_ser(cfg, pixel) ^ ws2812_i2s_reset_word(cfg);
+ 		}
+ 	}
+ 
+-	return ws2812_strip_update(cfg, mem_block, cfg->num_colors * num_pixels);
++	return 0;
++}
++
++static int ws2812_i2s_update_rgb(const struct device *dev, struct led_rgb *pixels,
++				 size_t num_pixels)
++{
++	const struct ws2812_i2s_cfg *cfg = dev->config;
++	void *mem_block = NULL;
++	int ret = 0;
++
++	/* The TX buffer is sized for the strip length from devicetree. */
++	if (num_pixels > cfg->length) {
++		return -EINVAL;
++	}
++
++	/*
++	 * A failed transfer releases the block to the I2S driver, so every
++	 * attempt needs a freshly allocated and filled frame.
++	 */
++	for (uint8_t attempt = 0; attempt <= WS2812_I2S_RETRY_COUNT; attempt++) {
++		ret = k_mem_slab_alloc(cfg->mem_slab, &mem_block, K_SECONDS(10));
++		if (ret < 0) {
++			LOG_ERR("Unable to allocate mem slab for TX (err %d)", ret);
++			return -ENOMEM;
++		}
++
++		ret = ws2812_i2s_fill_rgb(cfg, pixels, num_pixels, mem_block);
++		if (ret < 0) {
++			k_mem_slab_free(cfg->mem_slab, mem_block);
++			return ret;
++		}
++
++		ret = ws2812_strip_update(cfg, &mem_block, cfg->num_colors * num_pixels);
++		if (ret == 0) {
++			break;
++		}
++
++		/* Leave the stream usable and retry only a recoverable failure. */
++		ws2812_i2s_recover(cfg);
++		if (!ws2812_i2s_retryable(ret)) {
++			break;
++		}
++	}
++
++	if (mem_block != NULL) {
++		k_mem_slab_free(cfg->mem_slab, mem_block);
++	}
++
++	return ret;
+ }
+ 
+ static int ws2812_strip_update_rgb(const struct device *dev, struct led_rgb *pixels,
+@@ -214,36 +266,59 @@ static int ws2812_strip_update_rgb(const struct device *dev, struct led_rgb *pix
+ 	return ret;
+ }
+ 
++static void ws2812_i2s_fill_channels(const struct ws2812_i2s_cfg *cfg, uint8_t *channels,
++				     size_t num_channels, void *mem_block)
++{
++	uint32_t *frame = ws2812_get_first_data_frame(mem_block);
++
++	for (size_t i = 0; i < num_channels; i++) {
++		*frame = ws2812_i2s_ser(cfg, channels[i]) ^ ws2812_i2s_reset_word(cfg);
++		frame++;
++	}
++}
++
+ static int ws2812_i2s_update_channels(const struct device *dev, uint8_t *channels,
+ 				      size_t num_channels)
+ {
+ 	const struct ws2812_i2s_cfg *cfg = dev->config;
+-	void *mem_block;
+-	uint32_t *frame;
+-	int ret;
++	void *mem_block = NULL;
++	int ret = 0;
+ 
+ 	/* The TX buffer is sized for the strip length from devicetree. */
+ 	if (num_channels > cfg->length * cfg->num_colors) {
+ 		return -EINVAL;
+ 	}
+ 
+-	ret = k_mem_slab_alloc(cfg->mem_slab, &mem_block, K_SECONDS(10));
+-	if (ret < 0) {
+-		LOG_ERR("Unable to allocate mem slab for TX (err %d)", ret);
+-		return -ENOMEM;
+-	}
+ 	/*
+-	 * Convert pixel data into I2S frames. Each frame has pixel data
+-	 * in color mapping on-wire format (e.g. GRB, GRBW, RGB, etc).
++	 * A failed transfer releases the block to the I2S driver, so every
++	 * attempt needs a freshly allocated and filled frame.
+ 	 */
+-	frame = ws2812_get_first_data_frame(mem_block);
++	for (uint8_t attempt = 0; attempt <= WS2812_I2S_RETRY_COUNT; attempt++) {
++		ret = k_mem_slab_alloc(cfg->mem_slab, &mem_block, K_SECONDS(10));
++		if (ret < 0) {
++			LOG_ERR("Unable to allocate mem slab for TX (err %d)", ret);
++			return -ENOMEM;
++		}
+ 
+-	for (size_t i = 0; i < num_channels; i++) {
+-		*frame = ws2812_i2s_ser(cfg, channels[i]) ^ ws2812_i2s_reset_word(cfg);
+-		frame++;
++		ws2812_i2s_fill_channels(cfg, channels, num_channels, mem_block);
++
++		ret = ws2812_strip_update(cfg, &mem_block, num_channels);
++		if (ret == 0) {
++			break;
++		}
++
++		/* Leave the stream usable and retry only a recoverable failure. */
++		ws2812_i2s_recover(cfg);
++		if (!ws2812_i2s_retryable(ret)) {
++			break;
++		}
+ 	}
+ 
+-	return ws2812_strip_update(cfg, mem_block, num_channels);
++	if (mem_block != NULL) {
++		k_mem_slab_free(cfg->mem_slab, mem_block);
++	}
++
++	return ret;
+ }
+ 
+ static int ws2812_strip_update_channels(const struct device *dev, uint8_t *channels,
