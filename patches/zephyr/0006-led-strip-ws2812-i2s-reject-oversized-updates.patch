@@ -1,0 +1,28 @@
+diff --git a/drivers/led_strip/ws2812_i2s.c b/drivers/led_strip/ws2812_i2s.c
+index 918f046af47..036f5ddce08 100644
+--- a/drivers/led_strip/ws2812_i2s.c
++++ b/drivers/led_strip/ws2812_i2s.c
+@@ -152,6 +152,11 @@ static int ws2812_strip_update_rgb(const struct device *dev, struct led_rgb *pix
+ 	uint32_t *frame;
+ 	int ret;
+ 
++	/* The TX buffer is sized for the strip length from devicetree. */
++	if (num_pixels > cfg->length) {
++		return -EINVAL;
++	}
++
+ 	ret = k_mem_slab_alloc(cfg->mem_slab, &mem_block, K_SECONDS(10));
+ 	if (ret < 0) {
+ 		LOG_ERR("Unable to allocate mem slab for TX (err %d)", ret);
+@@ -200,6 +205,11 @@ static int ws2812_strip_update_channels(const struct device *dev, uint8_t *chann
+ 	uint32_t *frame;
+ 	int ret;
+ 
++	/* The TX buffer is sized for the strip length from devicetree. */
++	if (num_channels > cfg->length * cfg->num_colors) {
++		return -EINVAL;
++	}
++
+ 	ret = k_mem_slab_alloc(cfg->mem_slab, &mem_block, K_SECONDS(10));
+ 	if (ret < 0) {
+ 		LOG_ERR("Unable to allocate mem slab for TX (err %d)", ret);
