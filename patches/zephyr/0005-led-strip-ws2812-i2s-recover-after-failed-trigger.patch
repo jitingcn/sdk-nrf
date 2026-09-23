@@ -1,0 +1,58 @@
+diff --git a/drivers/led_strip/ws2812_i2s.c b/drivers/led_strip/ws2812_i2s.c
+index c0993bccf50..918f046af47 100644
+--- a/drivers/led_strip/ws2812_i2s.c
++++ b/drivers/led_strip/ws2812_i2s.c
+@@ -74,6 +74,30 @@ static uint32_t ws2812_i2s_ser(const struct ws2812_i2s_cfg *cfg, uint8_t color)
+ 	return (word >> 16) | (word << 16);
+ }
+ 
++/*
++ * Bring the TX stream back to READY after a failed transfer.
++ *
++ * I2S_TRIGGER_PREPARE is the documented recovery from the ERROR state
++ * (underrun/overrun); it is rejected with -EIO in any other state, where
++ * I2S_TRIGGER_DROP discards the queue and returns to READY from any state but
++ * NOT_READY. Both triggers release the memory blocks handed to the driver by a
++ * successful i2s_write(), so a failed frame has to be discarded here instead of
++ * being freed by the caller.
++ */
++static void ws2812_i2s_recover(const struct ws2812_i2s_cfg *cfg)
++{
++	int ret = i2s_trigger(cfg->dev, I2S_DIR_TX, I2S_TRIGGER_PREPARE);
++
++	if (ret == 0) {
++		return;
++	}
++
++	ret = i2s_trigger(cfg->dev, I2S_DIR_TX, I2S_TRIGGER_DROP);
++	if (ret < 0) {
++		LOG_ERR("Failed to recover the I2S TX stream: %d", ret);
++	}
++}
++
+ static int ws2812_strip_update(const struct ws2812_i2s_cfg *cfg, void *mem_block, size_t size)
+ {
+ 	uint32_t *frame = mem_block;
+@@ -102,12 +126,14 @@ static int ws2812_strip_update(const struct ws2812_i2s_cfg *cfg, void *mem_block
+ 	ret = i2s_trigger(cfg->dev, I2S_DIR_TX, I2S_TRIGGER_START);
+ 	if (ret < 0) {
+ 		LOG_ERR("Failed to trigger command %d on TX: %d", I2S_TRIGGER_START, ret);
++		ws2812_i2s_recover(cfg);
+ 		return ret;
+ 	}
+ 
+ 	ret = i2s_trigger(cfg->dev, I2S_DIR_TX, I2S_TRIGGER_DRAIN);
+ 	if (ret < 0) {
+ 		LOG_ERR("Failed to trigger command %d on TX: %d", I2S_TRIGGER_DRAIN, ret);
++		ws2812_i2s_recover(cfg);
+ 		return ret;
+ 	}
+ 
+@@ -156,6 +182,7 @@ static int ws2812_strip_update_rgb(const struct device *dev, struct led_rgb *pix
+ 				pixel = pixels[i].b;
+ 				break;
+ 			default:
++				k_mem_slab_free(cfg->mem_slab, mem_block);
+ 				return -EINVAL;
+ 			}
+ 			*frame++ = ws2812_i2s_ser(cfg, pixel) ^ ws2812_i2s_reset_word(cfg);
