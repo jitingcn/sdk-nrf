@@ -1,0 +1,79 @@
+diff --git a/drivers/led_strip/ws2812_spi.c b/drivers/led_strip/ws2812_spi.c
+index 125b276090d..03072f186d8 100644
+--- a/drivers/led_strip/ws2812_spi.c
++++ b/drivers/led_strip/ws2812_spi.c
+@@ -56,6 +56,10 @@ struct ws2812_spi_cfg {
+ 	uint16_t reset_delay;
+ };
+ 
++struct ws2812_spi_data {
++	struct k_mutex lock;
++};
++
+ static const struct ws2812_spi_cfg *dev_cfg(const struct device *dev)
+ {
+ 	return dev->config;
+@@ -116,9 +120,9 @@ static inline void ws2812_reset_delay(uint16_t delay)
+ 	k_usleep(delay);
+ }
+ 
+-static int ws2812_strip_update_rgb(const struct device *dev,
+-				   struct led_rgb *pixels,
+-				   size_t num_pixels)
++static int ws2812_spi_update_rgb(const struct device *dev,
++				 struct led_rgb *pixels,
++				 size_t num_pixels)
+ {
+ 	const struct ws2812_spi_cfg *cfg = dev_cfg(dev);
+ 	const uint8_t one = cfg->one_frame, zero = cfg->zero_frame;
+@@ -192,6 +196,20 @@ static int ws2812_strip_update_rgb(const struct device *dev,
+ 	return rc;
+ }
+ 
++static int ws2812_strip_update_rgb(const struct device *dev,
++				   struct led_rgb *pixels,
++				   size_t num_pixels)
++{
++	struct ws2812_spi_data *data = dev->data;
++	int ret;
++
++	k_mutex_lock(&data->lock, K_FOREVER);
++	ret = ws2812_spi_update_rgb(dev, pixels, num_pixels);
++	k_mutex_unlock(&data->lock);
++
++	return ret;
++}
++
+ static size_t ws2812_strip_length(const struct device *dev)
+ {
+ 	const struct ws2812_spi_cfg *cfg = dev_cfg(dev);
+@@ -202,8 +220,11 @@ static size_t ws2812_strip_length(const struct device *dev)
+ static int ws2812_spi_init(const struct device *dev)
+ {
+ 	const struct ws2812_spi_cfg *cfg = dev_cfg(dev);
++	struct ws2812_spi_data *data = dev->data;
+ 	uint8_t i;
+ 
++	k_mutex_init(&data->lock);
++
+ 	if (!spi_is_ready_dt(&cfg->bus)) {
+ 		LOG_ERR("SPI device %s not ready", cfg->bus.bus->name);
+ 		return -ENODEV;
+@@ -268,6 +289,8 @@ static DEVICE_API(led_strip, ws2812_spi_api) = {
+ 		IF_ENABLED(CONFIG_WS2812_STRIP_SPI_FORCE_NOCACHE, (__nocache)); \
+ 										\
+ 	WS2812_COLOR_MAPPING(idx);						\
++	static struct ws2812_spi_data ws2812_spi_##idx##_data;                  \
++                                                                                \
+ 										\
+ 	static const struct ws2812_spi_cfg ws2812_spi_##idx##_cfg = {		\
+ 		.bus = SPI_DT_SPEC_INST_GET(idx, SPI_OPER(idx)),		\
+@@ -284,7 +307,7 @@ static DEVICE_API(led_strip, ws2812_spi_api) = {
+ 	DEVICE_DT_INST_DEFINE(idx,						\
+ 			      ws2812_spi_init,					\
+ 			      NULL,						\
+-			      NULL,						\
++			      &ws2812_spi_##idx##_data,                         \
+ 			      &ws2812_spi_##idx##_cfg,				\
+ 			      POST_KERNEL,					\
+ 			      CONFIG_LED_STRIP_INIT_PRIORITY,			\
