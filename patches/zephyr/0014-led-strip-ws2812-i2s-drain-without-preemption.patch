@@ -1,0 +1,32 @@
+diff --git a/drivers/led_strip/ws2812_i2s.c b/drivers/led_strip/ws2812_i2s.c
+index 0663c8c..6600a8d 100644
+--- a/drivers/led_strip/ws2812_i2s.c
++++ b/drivers/led_strip/ws2812_i2s.c
+@@ -176,14 +176,27 @@ static int ws2812_strip_update(const struct ws2812_i2s_cfg *cfg, void **mem_bloc
+ 	 */
+ 	*mem_block = NULL;
+ 
++	/*
++	 * The transfer may not be preempted between starting it and requesting
++	 * the drain: the I2S driver asks for the next TX buffer in the very
++	 * interrupt that the START trigger raises, and turns a missing buffer
++	 * into an error once the transmitted one ends. Disabling preemption for
++	 * these two triggers (neither of them blocks) keeps DRAIN ahead of that
++	 * deadline no matter how long the caller would otherwise be descheduled.
++	 */
++	k_sched_lock();
++
+ 	ret = i2s_trigger(cfg->dev, I2S_DIR_TX, I2S_TRIGGER_START);
+ 	if (ret < 0) {
++		k_sched_unlock();
+ 		LOG_ERR("Failed to trigger command %d on TX: %d", I2S_TRIGGER_START, ret);
+ 		ws2812_i2s_recover(cfg);
+ 		return ret;
+ 	}
+ 
+ 	ret = i2s_trigger(cfg->dev, I2S_DIR_TX, I2S_TRIGGER_DRAIN);
++	k_sched_unlock();
++
+ 	if (ret < 0) {
+ 		LOG_ERR("Failed to trigger command %d on TX: %d", I2S_TRIGGER_DRAIN, ret);
+ 		ws2812_i2s_recover(cfg);
