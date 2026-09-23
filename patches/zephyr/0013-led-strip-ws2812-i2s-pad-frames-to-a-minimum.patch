@@ -1,0 +1,92 @@
+diff --git a/drivers/led_strip/ws2812_i2s.c b/drivers/led_strip/ws2812_i2s.c
+index 15a967c..0ecd29d 100644
+--- a/drivers/led_strip/ws2812_i2s.c
++++ b/drivers/led_strip/ws2812_i2s.c
+@@ -32,6 +32,25 @@ LOG_MODULE_REGISTER(ws2812_i2s);
+ #define WS2812_I2S_PRE_DELAY_WORDS 1
+ #define WS2812_I2S_RETRY_COUNT 1
+ 
++/*
++ * Minimum time one frame occupies on the wire.
++ *
++ * The I2S driver asks for the next TX buffer in the interrupt raised when the
++ * peripheral starts the current one, and reports an underrun ("Next buffers not
++ * supplied on time", which it turns into an ERROR state) if no buffer was
++ * supplied by the time that one ends. I2S_TRIGGER_DRAIN, which ends the transfer
++ * after the queued frame, is only accepted while the stream is still running, so
++ * it has to be processed before the transmitted buffer ends. The update path
++ * blocks preemption across those two triggers, so this minimum only has to cover
++ * the remaining interrupt latency.
++ *
++ * Keeping the minimum small therefore limits both how long a caller is blocked
++ * per frame (a 1 ms minimum measured 1.5 ms per update, a third of it this
++ * padding) and how much of the time the I2S peripheral runs between
++ * pattern steps, while still leaving the strip the latch reset it needs.
++ */
++#define WS2812_I2S_MIN_FRAME_US 300
++
+ struct ws2812_i2s_cfg {
+ 	struct device const *dev;
+ 	size_t tx_buf_bytes;
+@@ -39,7 +58,6 @@ struct ws2812_i2s_cfg {
+ 	uint8_t num_colors;
+ 	size_t length;
+ 	const uint8_t *color_mapping;
+-	uint16_t reset_words;
+ 	uint32_t lrck_period;
+ 	uint32_t extra_wait_time_us;
+ 	bool active_low;
+@@ -133,9 +151,14 @@ static int ws2812_strip_update(const struct ws2812_i2s_cfg *cfg, void **mem_bloc
+ 		frame[i] = ws2812_i2s_reset_word(cfg);
+ 	}
+ 
+-	/* Add post-data reset */
++	/*
++	 * Add the post-data reset and the minimum frame padding: everything up
++	 * to the end of the block is written, which also keeps a partial channel
++	 * update from transmitting whatever the previous frame left behind.
++	 */
+ 	frame = (uint32_t *)*mem_block + WS2812_I2S_PRE_DELAY_WORDS + size;
+-	for (uint16_t i = 0; i < cfg->reset_words; i++) {
++	for (size_t i = 0; i < cfg->tx_buf_bytes / sizeof(uint32_t) - WS2812_I2S_PRE_DELAY_WORDS - size;
++	     i++) {
+ 		frame[i] = ws2812_i2s_reset_word(cfg);
+ 	}
+ 
+@@ -457,9 +480,26 @@ static DEVICE_API(led_strip, ws2812_i2s_api) = {
+ 
+ #define WS2812_I2S_NUM_PIXELS(idx) (DT_INST_PROP(idx, chain_length))
+ 
++#define WS2812_I2S_DATA_WORDS(idx) (WS2812_NUM_COLORS(idx) * WS2812_I2S_NUM_PIXELS(idx))
++
++#define WS2812_I2S_MIN_FRAME_WORDS(idx)                                                            \
++	DIV_ROUND_UP(WS2812_I2S_MIN_FRAME_US, WS2812_I2S_LRCK_PERIOD_US(idx))
++
++/* Reset words appended after the data to reach the minimum frame duration;
++ * zero when the data alone already takes longer than that.
++ */
++#define WS2812_I2S_PAD_WORDS(idx)                                                                  \
++	((WS2812_I2S_MIN_FRAME_WORDS(idx) >                                                        \
++	  (WS2812_I2S_PRE_DELAY_WORDS + WS2812_I2S_DATA_WORDS(idx) +                                \
++	   WS2812_RESET_DELAY_WORDS(idx)))                                                         \
++		 ? (WS2812_I2S_MIN_FRAME_WORDS(idx) -                                              \
++		    (WS2812_I2S_PRE_DELAY_WORDS + WS2812_I2S_DATA_WORDS(idx) +                     \
++		     WS2812_RESET_DELAY_WORDS(idx)))                                               \
++		 : 0)
++
+ #define WS2812_I2S_BUFSIZE(idx)                                                                    \
+-	(((WS2812_NUM_COLORS(idx) * WS2812_I2S_NUM_PIXELS(idx)) +	                           \
+-	  WS2812_I2S_PRE_DELAY_WORDS + WS2812_RESET_DELAY_WORDS(idx)) * 4)
++	((WS2812_I2S_DATA_WORDS(idx) + WS2812_I2S_PRE_DELAY_WORDS +                                \
++	  WS2812_RESET_DELAY_WORDS(idx) + WS2812_I2S_PAD_WORDS(idx)) * 4)
+ 
+ #define WS2812_I2S_DEVICE(idx)                                                                     \
+                                                                                                    \
+@@ -479,7 +519,6 @@ static DEVICE_API(led_strip, ws2812_i2s_api) = {
+ 		.color_mapping = ws2812_i2s_##idx##_color_mapping,                                 \
+ 		.lrck_period = WS2812_I2S_LRCK_PERIOD_US(idx),                                     \
+ 		.extra_wait_time_us = DT_INST_PROP(idx, extra_wait_time),                          \
+-		.reset_words = WS2812_RESET_DELAY_WORDS(idx),                                      \
+ 		.active_low = DT_INST_PROP(idx, out_active_low),                                   \
+ 		.nibble_one = DT_INST_PROP(idx, nibble_one),                                       \
+ 		.nibble_zero = DT_INST_PROP(idx, nibble_zero),                                     \
