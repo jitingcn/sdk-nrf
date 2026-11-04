@@ -267,6 +267,7 @@ static struct esb_address esb_addr = {
 static uint32_t errata_216_timer_shorts;
 
 static esb_event_handler event_handler;
+static uint8_t broadcast_length;
 static esb_ack_handler ack_handler;
 static void (*rx_metadata_handler)(struct esb_payload *payload);
 static esb_tx_capture_handler tx_capture_handler;
@@ -2495,6 +2496,7 @@ static void esb_irq_disable(void)
 
 int esb_init(const struct esb_config *config)
 {
+	broadcast_length = 0;
 	int err;
 
 	if (!config) {
@@ -2702,6 +2704,7 @@ int esb_suspend(void)
 
 void esb_disable(void)
 {
+	broadcast_length = 0;
 	if (esb_state == ESB_STATE_UNINITIALIZED) {
 		return;
 	}
@@ -3003,7 +3006,7 @@ static void on_radio_disabled_broadcast(void)
 }
 
 static uint8_t broadcast_buffer[sizeof(tx_payload_buffer)] __aligned(4);
-static uint8_t broadcast_length, broadcast_pipe;
+static uint8_t broadcast_pipe;
 static int8_t broadcast_power;
 static uint8_t broadcast_channel;
 
@@ -3085,7 +3088,17 @@ int esb_prx_broadcast_arm_event(uint32_t delay_us, uint32_t start_event)
 	if (!broadcast_begun) return -EINVAL;
 	if (!start_event || delay_us < 5 || delay_us > 1000)
 		return broadcast_cancel(-EINVAL);
-	while (!nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_DISABLED)) { }
+	unsigned polls = 4096;
+	while (!nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_DISABLED)) {
+		if (broadcast_event_fired(start_event) || !--polls)
+			{
+			/* DISABLED is unconfirmed: never restart PRX or reuse DMA. */
+			broadcast_begun = false;
+			broadcast_length = 0;
+			esb_state = ESB_STATE_UNINITIALIZED;
+			return -ETIMEDOUT;
+		}
+	}
 	mpsl_fem_lna_configuration_clear();
 	struct esb_radio_pdu *pdu = (struct esb_radio_pdu *)broadcast_buffer;
 	nrf_radio_txaddress_set(NRF_RADIO, broadcast_pipe);
