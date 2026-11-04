@@ -344,6 +344,8 @@ struct esb_rx_diagnostics {
  *  Use for precise time-sync T4 on the tracker side.
  */
 extern volatile uint32_t esb_last_ack_rx_ticks;
+/* TX-END ISR timestamp of the attempt that received the last ACK. */
+extern volatile uint32_t esb_last_ack_tx_end_ticks;
 
 /** @brief ACK payload handler prototype.
  *
@@ -494,6 +496,25 @@ int esb_start_rx(void);
  *           Otherwise, a (negative) error code is returned.
  */
 int esb_stop_rx(void);
+
+/** Copy invariant bytes to a dedicated broadcast DMA buffer before freeze.
+ * The returned bytes may be patched until arm_event and never overlap RX ACK
+ * data. Call with IRQs locked; only one prepared broadcast may be outstanding.
+ * Returns NULL for invalid input or while a broadcast is in progress.
+ */
+uint8_t *esb_prx_broadcast_prepare(const struct esb_payload *payload);
+/** Begin PRX ramp-down at freeze. IRQs must stay locked through arm_event.
+ * After success, arm_event must be called to finish arming.
+ */
+int esb_prx_broadcast_begin(void);
+/** Arm before a future hardware event starts the ESB timer. nRF52 only.
+ * Program and clear the event before begin. If it fires before arming ends,
+ * cancel the transmission, restore PRX and return -ETIME. Keep exclusive radio
+ * ownership through wait. The payload's data lives in the prepared DMA buffer.
+ */
+int esb_prx_broadcast_arm_event(uint32_t delay_us, uint32_t start_event);
+/** Wait for an armed broadcast with IRQs enabled, recovering RX on timeout. */
+int esb_prx_broadcast_wait(uint32_t delay_us);
 
 /** @brief Flush the TX buffer.
  *
