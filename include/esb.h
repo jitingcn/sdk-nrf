@@ -305,6 +305,9 @@ struct esb_payload {
 			 */
 	uint8_t pid;    /**< PID assigned during communication. */
 	uint8_t data[CONFIG_ESB_MAX_PAYLOAD_LENGTH]; /**< The payload data. */
+	uint32_t rx_ticks; /**< Receive END tick, retained with this FIFO entry. */
+	uint32_t rx_context; /**< Application receive-layout generation. */
+	bool rx_pose; /**< Application classification of this FIFO entry. */
 };
 
 /** @brief Enhanced ShockBurst event. */
@@ -405,6 +408,7 @@ struct esb_config {
 				 *  between nRF52 and/or nRF53 Series devices, this delay can
 				 *  be reduced to 40 µs.
 				 */
+	void (*rx_metadata_handler)(struct esb_payload *payload);
 	esb_ack_handler ack_handler;	/**< ACK handler. */
 };
 

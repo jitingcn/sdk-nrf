@@ -268,6 +268,7 @@ static uint32_t errata_216_timer_shorts;
 
 static esb_event_handler event_handler;
 static esb_ack_handler ack_handler;
+static void (*rx_metadata_handler)(struct esb_payload *payload);
 static esb_tx_capture_handler tx_capture_handler;
 static struct esb_payload *current_payload;
 static struct esb_payload ack_payload;
@@ -1291,7 +1292,7 @@ static void tx_fifo_remove_first(void)
  *  @retval true   Operation successful.
  *  @retval false  Operation failed.
  */
-static bool rx_fifo_push_rfbuf(uint8_t pipe, uint8_t pid)
+static bool rx_fifo_push_rfbuf(uint8_t pipe, uint8_t pid, uint32_t end_ticks)
 {
 	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
 
@@ -1321,6 +1322,12 @@ static bool rx_fifo_push_rfbuf(uint8_t pipe, uint8_t pid)
 	rx_fifo.payload[rx_fifo.back]->rssi = nrf_radio_rssi_sample_get(NRF_RADIO);
 	rx_fifo.payload[rx_fifo.back]->pid = pid;
 	rx_fifo.payload[rx_fifo.back]->noack = !rx_pdu->type.dpl_pdu.ack;
+
+	struct esb_payload *received = rx_fifo.payload[rx_fifo.back];
+	received->rx_ticks = end_ticks;
+	received->rx_context = 0;
+	received->rx_pose = false;
+	if (rx_metadata_handler) rx_metadata_handler(received);
 
 	if (++rx_fifo.back >= CONFIG_ESB_RX_FIFO_SIZE) {
 		rx_fifo.back = 0;
@@ -1905,7 +1912,7 @@ static void on_radio_disabled_tx_wait_for_ack(void)
 
 		if ((esb_cfg.protocol != ESB_PROTOCOL_ESB) && (rx_pdu->type.dpl_pdu.length > 0)) {
 			if (rx_fifo_push_rfbuf(
-				nrf_radio_txaddress_get(NRF_RADIO), rx_pdu->type.dpl_pdu.pid)) {
+				nrf_radio_txaddress_get(NRF_RADIO), rx_pdu->type.dpl_pdu.pid, (uint32_t)k_uptime_ticks())) {
 				atomic_set_bit(&interrupt_flags, ESB_EVENT_RX_RECEIVED);
 			}
 		}
@@ -2185,6 +2192,7 @@ static void prepare_ack_pdu_dpl(bool retransmit_payload, struct pipe_info *pipe_
 
 static void on_radio_disabled_rx(void)
 {
+	uint32_t end_ticks = (uint32_t)k_uptime_ticks();
 	bool retransmit_payload = false;
 	bool send_rx_event = true;
 	bool suppress_ack = false;
@@ -2274,7 +2282,7 @@ static void on_radio_disabled_rx(void)
 		 * event if the operation was
 		 * successful.
 		 */
-		if (rx_fifo_push_rfbuf(nrf_radio_rxmatch_get(NRF_RADIO), pipe_info->pid)) {
+		if (rx_fifo_push_rfbuf(nrf_radio_rxmatch_get(NRF_RADIO), pipe_info->pid, end_ticks)) {
 			atomic_set_bit(&interrupt_flags, ESB_EVENT_RX_RECEIVED);
 			set_evt_interrupt();
 		}
@@ -2319,7 +2327,7 @@ static void on_radio_end_monitor(void)
 	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
 
 	pipe.pid = rx_pdu->type.dpl_pdu.pid;
-	if (rx_fifo_push_rfbuf(nrf_radio_rxmatch_get(NRF_RADIO), pipe.pid)) {
+	if (rx_fifo_push_rfbuf(nrf_radio_rxmatch_get(NRF_RADIO), pipe.pid, (uint32_t)k_uptime_ticks())) {
 		atomic_set_bit(&interrupt_flags, ESB_EVENT_RX_RECEIVED);
 		set_evt_interrupt();
 	}
@@ -2507,6 +2515,7 @@ int esb_init(const struct esb_config *config)
 
 	event_handler = config->event_handler;
 	ack_handler = config->ack_handler;
+	rx_metadata_handler = config->rx_metadata_handler;
 	tx_capture_handler = config->tx_capture_handler;
 
 	memcpy(&esb_cfg, config, sizeof(esb_cfg));
@@ -2912,6 +2921,9 @@ int esb_read_rx_payload(struct esb_payload *payload)
 		return -ENODATA;
 	}
 
+	payload->rx_ticks = rx_fifo.payload[rx_fifo.front]->rx_ticks;
+	payload->rx_context = rx_fifo.payload[rx_fifo.front]->rx_context;
+	payload->rx_pose = rx_fifo.payload[rx_fifo.front]->rx_pose;
 	payload->length = rx_fifo.payload[rx_fifo.front]->length;
 	payload->pipe = rx_fifo.payload[rx_fifo.front]->pipe;
 	payload->rssi = rx_fifo.payload[rx_fifo.front]->rssi;
