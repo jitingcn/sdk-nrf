@@ -153,6 +153,40 @@ config ESB_MPSL_TIMESLOT
 	  number of retransmissions, reduce ESB packets delivery rate, and cause the delay of
 	  retransmissions to vary.
 
+config ESB_HAS_RX_METADATA
+	def_bool y
+	help
+	  Capability marker, always set when this driver provides
+	  ESB_RX_METADATA. Applications can depend on it to stay buildable
+	  with SDK revisions that do not have the option.
+
+config ESB_RX_METADATA
+	bool "Per-entry receive metadata and TX-end timestamps"
+	help
+	  Store the receive END tick with each RX FIFO entry, let the
+	  application classify entries from the radio ISR through
+	  esb_config.rx_metadata_handler, and record the TX END tick of the
+	  attempt that received the last ACK (esb_last_ack_tx_end_ticks).
+	  Disabled by default; the driver then builds exactly as without
+	  this option.
+
+config ESB_HAS_PRX_BROADCAST
+	def_bool y
+	depends on SOC_SERIES_NRF52 && !ESB_MPSL_TIMESLOT
+	help
+	  Capability marker, set when this driver provides ESB_PRX_BROADCAST
+	  for the selected SoC.
+
+config ESB_PRX_BROADCAST
+	bool "Hardware-timed PRX broadcast"
+	depends on ESB_HAS_PRX_BROADCAST
+	help
+	  API for sending one NoACK frame from PRX mode at a time set by a
+	  hardware event (for example an RTC compare), then returning to RX:
+	  esb_prx_broadcast_prepare/begin/arm_event/wait. nRF52 only.
+	  Disabled by default; the driver then builds exactly as without
+	  this option.
+
 config ESB_NEVER_DISABLE_TX
 	select EXPERIMENTAL
 	bool "Never disable radio transmission stage"

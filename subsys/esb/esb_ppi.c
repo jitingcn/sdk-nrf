@@ -43,6 +43,25 @@ void esb_ppi_for_fem_set(bool capture_timer)
 	nrf_ppi_channel_enable(NRF_PPI, egu_timer_start);
 }
 
+#if defined(CONFIG_ESB_PRX_BROADCAST)
+void esb_ppi_for_broadcast_disable_rx(void)
+{
+	nrf_ppi_channels_disable(NRF_PPI,
+		BIT(egu_ramp_up) | BIT(disabled_egu) | BIT(egu_timer_start));
+}
+
+void esb_ppi_for_broadcast_set(uint32_t event)
+{
+	nrf_ppi_channel_endpoint_setup(NRF_PPI, timer_compare1_radio_txen,
+		nrf_timer_event_address_get(ESB_NRF_TIMER_INSTANCE, NRF_TIMER_EVENT_COMPARE1),
+		nrf_radio_task_address_get(NRF_RADIO, NRF_RADIO_TASK_TXEN));
+	nrf_ppi_channel_endpoint_setup(NRF_PPI, egu_timer_start, event,
+		nrf_timer_task_address_get(ESB_NRF_TIMER_INSTANCE, NRF_TIMER_TASK_START));
+	nrf_ppi_fork_endpoint_setup(NRF_PPI, egu_timer_start, 0);
+	nrf_ppi_channels_enable(NRF_PPI, BIT(egu_timer_start) | BIT(timer_compare1_radio_txen));
+}
+#endif /* CONFIG_ESB_PRX_BROADCAST */
+
 void esb_ppi_for_fem_clear(void)
 {
 	nrf_ppi_channel_disable(NRF_PPI, egu_timer_start);
