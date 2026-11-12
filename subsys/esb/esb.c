@@ -3046,7 +3046,6 @@ static uint8_t broadcast_pipe;
 static int8_t broadcast_power;
 static uint8_t broadcast_channel;
 
-/* Attribute provenance: Round 1 85be5d00 and receiver TIMING.md justify the begin/arm RAM group. Prepare noipa has no isolated timing proof; retain pending A/B. */
 __attribute__((noipa))
 uint8_t *esb_prx_broadcast_prepare(const struct esb_payload *payload)
 {
@@ -3066,9 +3065,6 @@ uint8_t *esb_prx_broadcast_prepare(const struct esb_payload *payload)
 	return pdu->data;
 }
 
-
-
-/* Attribute provenance: Round 1 85be5d00 and receiver TIMING.md justify the begin/arm RAM group. Prepare noipa has no isolated timing proof; retain pending A/B. */
 __attribute__((optimize("O3")))
 __ramfunc
 int esb_prx_broadcast_begin(void)
@@ -3115,7 +3111,6 @@ static int broadcast_cancel(int error)
 
 #endif
 
-/* Attribute provenance: Round 1 85be5d00 and receiver TIMING.md justify the begin/arm RAM group. Prepare noipa has no isolated timing proof; retain pending A/B. */
 __attribute__((optimize("O3")))
 __ramfunc
 int esb_prx_broadcast_arm_event(uint32_t delay_us, uint32_t start_event)
