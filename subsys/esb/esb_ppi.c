@@ -43,6 +43,7 @@ void esb_ppi_for_fem_set(bool capture_timer)
 	nrf_ppi_channel_enable(NRF_PPI, egu_timer_start);
 }
 
+#if defined(CONFIG_ESB_PRX_BROADCAST)
 void esb_ppi_for_broadcast_disable_rx(void)
 {
 	nrf_ppi_channels_disable(NRF_PPI,
@@ -59,6 +60,7 @@ void esb_ppi_for_broadcast_set(uint32_t event)
 	nrf_ppi_fork_endpoint_setup(NRF_PPI, egu_timer_start, 0);
 	nrf_ppi_channels_enable(NRF_PPI, BIT(egu_timer_start) | BIT(timer_compare1_radio_txen));
 }
+#endif /* CONFIG_ESB_PRX_BROADCAST */
 
 void esb_ppi_for_fem_clear(void)
 {

@@ -305,9 +305,11 @@ struct esb_payload {
 			 */
 	uint8_t pid;    /**< PID assigned during communication. */
 	uint8_t data[CONFIG_ESB_MAX_PAYLOAD_LENGTH]; /**< The payload data. */
+#if defined(CONFIG_ESB_RX_METADATA)
 	uint32_t rx_ticks; /**< Receive END tick, retained with this FIFO entry. */
 	uint32_t rx_context; /**< Application receive-layout generation. */
 	bool rx_pose; /**< Application classification of this FIFO entry. */
+#endif
 };
 
 /** @brief Enhanced ShockBurst event. */
@@ -347,8 +349,10 @@ struct esb_rx_diagnostics {
  *  Use for precise time-sync T4 on the tracker side.
  */
 extern volatile uint32_t esb_last_ack_rx_ticks;
+#if defined(CONFIG_ESB_RX_METADATA)
 /* TX-END ISR timestamp of the attempt that received the last ACK. */
 extern volatile uint32_t esb_last_ack_tx_end_ticks;
+#endif
 
 /** @brief ACK payload handler prototype.
  *
@@ -408,7 +412,10 @@ struct esb_config {
 				 *  between nRF52 and/or nRF53 Series devices, this delay can
 				 *  be reduced to 40 µs.
 				 */
+#if defined(CONFIG_ESB_RX_METADATA)
+	/** Optional; called from the radio ISR for each new RX FIFO entry. */
 	void (*rx_metadata_handler)(struct esb_payload *payload);
+#endif
 	esb_ack_handler ack_handler;	/**< ACK handler. */
 };
 
@@ -501,6 +508,7 @@ int esb_start_rx(void);
  */
 int esb_stop_rx(void);
 
+#if defined(CONFIG_ESB_PRX_BROADCAST)
 /** Copy invariant bytes to a dedicated broadcast DMA buffer before freeze.
  * The returned bytes may be patched until arm_event and never overlap RX ACK
  * data. Call with IRQs locked; only one prepared broadcast may be outstanding.
@@ -519,6 +527,7 @@ int esb_prx_broadcast_begin(void);
 int esb_prx_broadcast_arm_event(uint32_t delay_us, uint32_t start_event);
 /** Wait for an armed broadcast with IRQs enabled, recovering RX on timeout. */
 int esb_prx_broadcast_wait(uint32_t delay_us);
+#endif /* CONFIG_ESB_PRX_BROADCAST */
 
 /** @brief Flush the TX buffer.
  *
