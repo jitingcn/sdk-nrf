@@ -170,20 +170,20 @@ config ESB_RX_METADATA
 	  Disabled by default; the driver then builds exactly as without
 	  this option.
 
-config ESB_HAS_PRX_BROADCAST
+config ESB_HAS_PRX_TX
 	def_bool y
 	depends on SOC_SERIES_NRF52 && !ESB_MPSL_TIMESLOT
 	help
-	  Capability marker, set when this driver provides ESB_PRX_BROADCAST
+	  Capability marker, set when this driver provides ESB_PRX_TX
 	  for the selected SoC.
 
-config ESB_PRX_BROADCAST
-	bool "Hardware-timed PRX broadcast"
-	depends on ESB_HAS_PRX_BROADCAST
+config ESB_PRX_TX
+	bool "Hardware-timed PRX TX"
+	depends on ESB_HAS_PRX_TX
 	help
 	  API for sending one NoACK frame from PRX mode at a time set by a
 	  hardware event (for example an RTC compare), then returning to RX:
-	  esb_prx_broadcast_prepare/begin/arm_event/wait. nRF52 only.
+	  esb_prx_tx_prepare/begin/arm_event/wait. nRF52 only.
 	  Disabled by default; the driver then builds exactly as without
 	  this option.
 

@@ -128,10 +128,10 @@ int esb_ppi_init(void);
  */
 void esb_ppi_deinit(void);
 
-#if defined(CONFIG_ESB_PRX_BROADCAST)
+#if defined(CONFIG_ESB_PRX_TX)
 /* Start the ESB timer from an external event, using its existing PPI channel. */
-void esb_ppi_for_broadcast_set(uint32_t event);
-void esb_ppi_for_broadcast_disable_rx(void);
+void esb_ppi_for_prx_tx_set(uint32_t event);
+void esb_ppi_for_prx_tx_disable_rx(void);
 #endif
 
 

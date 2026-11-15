@@ -136,8 +136,8 @@ enum esb_state {
 				  * acknowledgment response.
 				  */
 	ESB_STATE_PRX,		 /* Receiving packets without ACK. */
-#if defined(CONFIG_ESB_PRX_BROADCAST)
-	ESB_STATE_PRX_BROADCAST, /* Scheduled NoACK downlink. */
+#if defined(CONFIG_ESB_PRX_TX)
+	ESB_STATE_PRX_TX, /* Scheduled NoACK downlink. */
 #endif
 	ESB_STATE_PRX_SEND_ACK,	 /* Transmitting ACK in RX mode. */
 	ESB_STATE_PTX_TXIDLE,	 /* Transmitter stage is idle but enabled */
@@ -269,8 +269,8 @@ static struct esb_address esb_addr = {
 static uint32_t errata_216_timer_shorts;
 
 static esb_event_handler event_handler;
-#if defined(CONFIG_ESB_PRX_BROADCAST)
-static uint8_t broadcast_length;
+#if defined(CONFIG_ESB_PRX_TX)
+static uint8_t prx_tx_length;
 #endif
 static esb_ack_handler ack_handler;
 #if defined(CONFIG_ESB_RX_METADATA)
@@ -2524,8 +2524,8 @@ int esb_init(const struct esb_config *config)
 {
 	int err;
 
-#if defined(CONFIG_ESB_PRX_BROADCAST)
-	broadcast_length = 0;
+#if defined(CONFIG_ESB_PRX_TX)
+	prx_tx_length = 0;
 #endif
 
 	if (!config) {
@@ -2735,8 +2735,8 @@ int esb_suspend(void)
 
 void esb_disable(void)
 {
-#if defined(CONFIG_ESB_PRX_BROADCAST)
-	broadcast_length = 0;
+#if defined(CONFIG_ESB_PRX_TX)
+	prx_tx_length = 0;
 #endif
 	if (esb_state == ESB_STATE_UNINITIALIZED) {
 		return;
@@ -3026,59 +3026,59 @@ int esb_start_rx(void)
 	return 0;
 }
 
-#if defined(CONFIG_ESB_PRX_BROADCAST)
+#if defined(CONFIG_ESB_PRX_TX)
 /* Completion owns the same PPI/FEM cleanup on success and timeout. */
-static volatile bool prx_broadcast_active;
-static bool broadcast_begun;
+static volatile bool prx_tx_active;
+static bool prx_tx_begun;
 
-static void on_radio_disabled_broadcast(void)
+static void on_radio_disabled_prx_tx(void)
 {
 	esb_ppi_for_retransmission_clear();
 	esb_fem_for_tx_retry_clear();
 	nrfx_timer_disable(&esb_timer);
-	prx_broadcast_active = false;
-	broadcast_begun = false;
+	prx_tx_active = false;
+	prx_tx_begun = false;
 	start_rx_listening();
 }
 
-static uint8_t broadcast_buffer[sizeof(tx_payload_buffer)] __aligned(4);
-static uint8_t broadcast_pipe;
-static int8_t broadcast_power;
-static uint8_t broadcast_channel;
+static uint8_t prx_tx_buffer[sizeof(tx_payload_buffer)] __aligned(4);
+static uint8_t prx_tx_pipe;
+static int8_t prx_tx_power;
+static uint8_t prx_tx_channel;
 
 __attribute__((noipa))
-uint8_t *esb_prx_broadcast_prepare(const struct esb_payload *payload)
+uint8_t *esb_prx_tx_prepare(const struct esb_payload *payload)
 {
 	if (!payload || !payload->length || payload->length > CONFIG_ESB_MAX_PAYLOAD_LENGTH ||
-	    payload->pipe >= CONFIG_ESB_PIPE_COUNT || prx_broadcast_active || broadcast_begun ||
+	    payload->pipe >= CONFIG_ESB_PIPE_COUNT || prx_tx_active || prx_tx_begun ||
 	    esb_cfg.mode != ESB_MODE_PRX || esb_cfg.protocol != ESB_PROTOCOL_ESB_DPL) return NULL;
-	struct esb_radio_pdu *pdu = (struct esb_radio_pdu *)broadcast_buffer;
+	struct esb_radio_pdu *pdu = (struct esb_radio_pdu *)prx_tx_buffer;
 	memset(&pdu->type.dpl_pdu, 0, sizeof(pdu->type.dpl_pdu));
 	pdu->type.dpl_pdu.length = payload->length;
 	memcpy(pdu->data, payload->data, payload->length);
 	update_radio_tx_power();
 	mpsl_fem_utils_available_cc_channels_cache(tx_time_shifted.event.timer.compare_channel_mask);
-	broadcast_power = esb_cfg.tx_output_power;
-	broadcast_channel = esb_addr.rf_channel;
-	broadcast_length = payload->length;
-	broadcast_pipe = payload->pipe;
+	prx_tx_power = esb_cfg.tx_output_power;
+	prx_tx_channel = esb_addr.rf_channel;
+	prx_tx_length = payload->length;
+	prx_tx_pipe = payload->pipe;
 	return pdu->data;
 }
 
 __attribute__((optimize("O3")))
 __ramfunc
-int esb_prx_broadcast_begin(void)
+int esb_prx_tx_begin(void)
 {
 	if (!IS_ENABLED(CONFIG_SOC_SERIES_NRF52)) return -ENOTSUP;
 	if (esb_cfg.mode != ESB_MODE_PRX || esb_cfg.protocol != ESB_PROTOCOL_ESB_DPL ||
 	    IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)) return -ENOTSUP;
-	if (esb_state != ESB_STATE_PRX || !broadcast_length ||
-	    esb_cfg.tx_output_power != broadcast_power || esb_addr.rf_channel != broadcast_channel)
+	if (esb_state != ESB_STATE_PRX || !prx_tx_length ||
+	    esb_cfg.tx_output_power != prx_tx_power || esb_addr.rf_channel != prx_tx_channel)
 		return -EBUSY;
 	/* PRX has no active PA configuration. Leave the LNA's DISABLED endpoint
 	 * intact until the radio stops; mask-dependent work hides RX ramp-down. */
 #if defined(CONFIG_SOC_SERIES_NRF52)
-	esb_ppi_for_broadcast_disable_rx();
+	esb_ppi_for_prx_tx_disable_rx();
 #else
 	esb_ppi_for_txrx_clear(true, true);
 #endif
@@ -3090,22 +3090,22 @@ int esb_prx_broadcast_begin(void)
 	nrfx_timer_disable(&esb_timer);
 	nrf_timer_shorts_set(esb_timer.p_reg, 0);
 	nrf_timer_int_disable(esb_timer.p_reg, 0xffffffff);
-	esb_state = ESB_STATE_PRX_BROADCAST;
-	broadcast_begun = true;
+	esb_state = ESB_STATE_PRX_TX;
+	prx_tx_begun = true;
 	return 0;
 }
 
 
 #if defined(CONFIG_SOC_SERIES_NRF52)
-static bool broadcast_event_fired(uint32_t event)
+static bool prx_tx_event_fired(uint32_t event)
 {
 	return *(volatile const uint32_t *)event != 0;
 }
 
-static int broadcast_cancel(int error)
+static int prx_tx_cancel(int error)
 {
 	clear_peripherals();
-	on_radio_disabled_broadcast();
+	on_radio_disabled_prx_tx();
 	return error;
 }
 
@@ -3113,32 +3113,32 @@ static int broadcast_cancel(int error)
 
 __attribute__((optimize("O3")))
 __ramfunc
-int esb_prx_broadcast_arm_event(uint32_t delay_us, uint32_t start_event)
+int esb_prx_tx_arm_event(uint32_t delay_us, uint32_t start_event)
 {
 #if defined(CONFIG_SOC_SERIES_NRF52)
-	if (!broadcast_begun) return -EINVAL;
+	if (!prx_tx_begun) return -EINVAL;
 	if (!start_event || delay_us < 5 || delay_us > 1000)
-		return broadcast_cancel(-EINVAL);
+		return prx_tx_cancel(-EINVAL);
 	unsigned polls = 4096;
 	while (!nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_DISABLED)) {
-		if (broadcast_event_fired(start_event) || !--polls)
+		if (prx_tx_event_fired(start_event) || !--polls)
 			{
 			/* DISABLED is unconfirmed: never restart PRX or reuse DMA. */
-			broadcast_begun = false;
-			broadcast_length = 0;
+			prx_tx_begun = false;
+			prx_tx_length = 0;
 			esb_state = ESB_STATE_UNINITIALIZED;
 			return -ETIMEDOUT;
 		}
 	}
 	mpsl_fem_lna_configuration_clear();
-	struct esb_radio_pdu *pdu = (struct esb_radio_pdu *)broadcast_buffer;
-	nrf_radio_txaddress_set(NRF_RADIO, broadcast_pipe);
+	struct esb_radio_pdu *pdu = (struct esb_radio_pdu *)prx_tx_buffer;
+	nrf_radio_txaddress_set(NRF_RADIO, prx_tx_pipe);
 	nrf_radio_packetptr_set(NRF_RADIO, pdu);
 	nrf_radio_shorts_set(NRF_RADIO, RADIO_NORMAL_SW_SHORTS);
 	nrf_radio_event_clear(NRF_RADIO, ESB_RADIO_EVENT_END);
 	nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_DISABLED);
-	on_radio_disabled = on_radio_disabled_broadcast;
-	prx_broadcast_active = true;
+	on_radio_disabled = on_radio_disabled_prx_tx;
+	prx_tx_active = true;
 	nrf_timer_cc_set(esb_timer.p_reg, NRF_TIMER_CC_CHANNEL1, delay_us);
 	tx_time_shifted.event.timer.counter_period.end = delay_us +
 		(esb_cfg.use_fast_ramp_up ? TX_FAST_RAMP_UP_TIME_US : TX_RAMP_UP_TIME_US);
@@ -3150,32 +3150,32 @@ int esb_prx_broadcast_arm_event(uint32_t delay_us, uint32_t start_event)
 	 * to timer START and compare 1 to TXEN, without an intermediate EGU. */
 	nrf_radio_int_enable(NRF_RADIO, NRF_RADIO_INT_DISABLED_MASK);
 	__DMB();
-	esb_ppi_for_broadcast_set(start_event);
-	if (broadcast_event_fired(start_event)) return broadcast_cancel(-ETIME);
-	broadcast_begun = false;
+	esb_ppi_for_prx_tx_set(start_event);
+	if (prx_tx_event_fired(start_event)) return prx_tx_cancel(-ETIME);
+	prx_tx_begun = false;
 	return 0;
 #else
 	return -ENOTSUP;
 #endif
 }
 
-int esb_prx_broadcast_wait(uint32_t delay_us)
+int esb_prx_tx_wait(uint32_t delay_us)
 {
 	for (unsigned elapsed = 0; elapsed < delay_us + 500U; elapsed++) {
-		if (!prx_broadcast_active) {
+		if (!prx_tx_active) {
 			return 0;
 		}
 		k_busy_wait(1);
 	}
 	unsigned key = irq_lock();
-	if (prx_broadcast_active) {
+	if (prx_tx_active) {
 		clear_peripherals();
-		on_radio_disabled_broadcast();
+		on_radio_disabled_prx_tx();
 	}
 	irq_unlock(key);
 	return -ETIMEDOUT;
 }
-#endif /* CONFIG_ESB_PRX_BROADCAST */
+#endif /* CONFIG_ESB_PRX_TX */
 
 
 

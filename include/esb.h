@@ -508,30 +508,30 @@ int esb_start_rx(void);
  */
 int esb_stop_rx(void);
 
-#if defined(CONFIG_ESB_PRX_BROADCAST)
-/** Copy invariant bytes to a dedicated broadcast DMA buffer before freeze.
+#if defined(CONFIG_ESB_PRX_TX)
+/** Copy invariant bytes to a dedicated PRX TX DMA buffer before freeze.
  * The returned bytes may be patched until arm_event and never overlap RX ACK
- * data. Call with IRQs locked; only one prepared broadcast may be outstanding.
- * Returns NULL for invalid input or while a broadcast is in progress.
+ * data. Call with IRQs locked; only one prepared PRX TX may be outstanding.
+ * Returns NULL for invalid input or while a PRX TX is in progress.
  *
- * Every broadcast is sent with PID 0; the PID is not advanced between
- * broadcasts. A plain ESB PRX that keeps duplicate-detection state
- * treats a broadcast whose CRC and PID equal the previous packet on that pipe
- * as a retransmission and drops it. Change the payload between broadcasts
+ * Every PRX TX is sent with PID 0; the PID is not advanced between
+ * transmissions. A plain ESB PRX that keeps duplicate-detection state
+ * treats a frame whose CRC and PID equal the previous packet on that pipe
+ * as a retransmission and drops it. Change the payload between transmissions
  * (for example with a frame counter) if receivers must see every one.
  */
-uint8_t *esb_prx_broadcast_prepare(const struct esb_payload *payload);
+uint8_t *esb_prx_tx_prepare(const struct esb_payload *payload);
 /** Begin PRX ramp-down at freeze. IRQs must stay locked through arm_event.
  * After success, arm_event must be called to finish arming.
  */
-int esb_prx_broadcast_begin(void);
+int esb_prx_tx_begin(void);
 /** Arm before a future hardware event starts the ESB timer. nRF52 only.
  * Program and clear the event before begin. If it fires before arming ends,
  * cancel the transmission, restore PRX and return -ETIME. Keep exclusive radio
  * ownership through wait. The payload's data lives in the prepared DMA buffer.
  */
-int esb_prx_broadcast_arm_event(uint32_t delay_us, uint32_t start_event);
-/** Wait for an armed broadcast with IRQs enabled, recovering RX on timeout.
+int esb_prx_tx_arm_event(uint32_t delay_us, uint32_t start_event);
+/** Wait for an armed PRX TX with IRQs enabled, recovering RX on timeout.
  *
  * The budget is counted from this call, not from the start event: the
  * function polls for completion up to delay_us + 500 times with a 1 us busy
@@ -542,8 +542,8 @@ int esb_prx_broadcast_arm_event(uint32_t delay_us, uint32_t start_event);
  * The fixed 500 us is margin for DISABLED handling, not airtime. On timeout
  * the radio is stopped, PRX is restarted and -ETIMEDOUT is returned.
  */
-int esb_prx_broadcast_wait(uint32_t delay_us);
-#endif /* CONFIG_ESB_PRX_BROADCAST */
+int esb_prx_tx_wait(uint32_t delay_us);
+#endif /* CONFIG_ESB_PRX_TX */
 
 /** @brief Flush the TX buffer.
  *
