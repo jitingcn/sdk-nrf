@@ -271,10 +271,21 @@ static uint32_t errata_216_timer_shorts;
 static esb_event_handler event_handler;
 #if defined(CONFIG_ESB_PRX_TX)
 static uint8_t prx_tx_length;
+static volatile bool prx_tx_active;
+static bool prx_tx_begun;
+static bool prx_tx_faulted;
+
+static void prx_tx_reset(void)
+{
+	prx_tx_length = 0;
+	prx_tx_active = false;
+	prx_tx_begun = false;
+}
 #endif
 static esb_ack_handler ack_handler;
 #if defined(CONFIG_ESB_RX_METADATA)
-static void (*rx_metadata_handler)(struct esb_payload *payload);
+static void (*rx_metadata_handler)(const struct esb_payload *payload, uint32_t *rx_context,
+				   bool *rx_pose);
 #endif
 static esb_tx_capture_handler tx_capture_handler;
 static struct esb_payload *current_payload;
@@ -302,7 +313,6 @@ static volatile uint32_t last_tx_attempts;
 static volatile uint32_t wait_for_ack_timeout_us;
 volatile uint32_t esb_last_ack_rx_ticks;
 #if defined(CONFIG_ESB_RX_METADATA)
-volatile uint32_t esb_last_ack_tx_end_ticks;
 static uint32_t tx_end_ticks;
 #endif
 static atomic_t rx_crc_failures;
@@ -1342,10 +1352,11 @@ static bool rx_fifo_push_rfbuf(uint8_t pipe, uint8_t pid)
 #if defined(CONFIG_ESB_RX_METADATA)
 	struct esb_payload *received = rx_fifo.payload[rx_fifo.back];
 	received->rx_ticks = end_ticks;
+	received->tx_end_ticks = esb_cfg.mode == ESB_MODE_PTX ? tx_end_ticks : 0;
 	received->rx_context = 0;
 	received->rx_pose = false;
 	if (rx_metadata_handler) {
-		rx_metadata_handler(received);
+		rx_metadata_handler(received, &received->rx_context, &received->rx_pose);
 	}
 #endif
 
@@ -1895,6 +1906,9 @@ static void schedule_retx_in_timeslot(void)
 
 static void on_radio_disabled_tx_wait_for_ack(void)
 {
+#if defined(CONFIG_ESB_RX_METADATA)
+	const uint32_t ack_ticks = sys_clock_tick_get_32();
+#endif
 	struct esb_radio_pdu *rx_pdu = (struct esb_radio_pdu *)rx_payload_buffer;
 	/* This marks the completion of a TX_RX sequence (TX with ACK) */
 
@@ -1927,9 +1941,10 @@ static void on_radio_disabled_tx_wait_for_ack(void)
 			);
 		}
 		atomic_set_bit(&interrupt_flags, ESB_EVENT_TX_SUCCESS);
-		esb_last_ack_rx_ticks = sys_clock_tick_get_32();
 #if defined(CONFIG_ESB_RX_METADATA)
-		esb_last_ack_tx_end_ticks = tx_end_ticks;
+		esb_last_ack_rx_ticks = ack_ticks;
+#else
+		esb_last_ack_rx_ticks = sys_clock_tick_get_32();
 #endif
 
 		tx_fifo_remove_first();
@@ -1937,7 +1952,7 @@ static void on_radio_disabled_tx_wait_for_ack(void)
 		if ((esb_cfg.protocol != ESB_PROTOCOL_ESB) && (rx_pdu->type.dpl_pdu.length > 0)) {
 			if (RX_FIFO_PUSH(
 				nrf_radio_txaddress_get(NRF_RADIO), rx_pdu->type.dpl_pdu.pid,
-				(uint32_t)k_uptime_ticks())) {
+				ack_ticks)) {
 				atomic_set_bit(&interrupt_flags, ESB_EVENT_RX_RECEIVED);
 			}
 		}
@@ -2524,13 +2539,18 @@ int esb_init(const struct esb_config *config)
 {
 	int err;
 
-#if defined(CONFIG_ESB_PRX_TX)
-	prx_tx_length = 0;
-#endif
-
 	if (!config) {
 		return -EINVAL;
 	}
+#if defined(CONFIG_ESB_PRX_TX)
+	if (prx_tx_faulted) {
+		esb_disable();
+		if (prx_tx_faulted) {
+			return -ETIMEDOUT;
+		}
+	}
+	prx_tx_reset();
+#endif
 
 	if (esb_state != ESB_STATE_UNINITIALIZED) {
 		esb_disable();
@@ -2714,6 +2734,9 @@ int esb_suspend(void)
 	if (!IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT)) {
 		on_radio_disabled = NULL;
 		clear_peripherals();
+#if defined(CONFIG_ESB_PRX_TX)
+		prx_tx_reset();
+#endif
 		esb_state = ESB_STATE_IDLE;
 
 	} else { /* IS_ENABLED(CONFIG_ESB_MPSL_TIMESLOT) */
@@ -2736,7 +2759,23 @@ int esb_suspend(void)
 void esb_disable(void)
 {
 #if defined(CONFIG_ESB_PRX_TX)
-	prx_tx_length = 0;
+	prx_tx_reset();
+	if (prx_tx_faulted) {
+		/* Keep RX and DMA isolated until RADIO has stopped. */
+		if (nrf_radio_state_get(NRF_RADIO) != NRF_RADIO_STATE_DISABLED) {
+			return;
+		}
+		/* The fault path already disconnected PPI and stopped the timer;
+		 * release the resources esb_init() allocates, once.
+		 */
+		prx_tx_faulted = false;
+		if (IS_ENABLED(CONFIG_ESB_CLOCK_INIT)) {
+			(void)esb_clocks_stop();
+		}
+		sys_timer_deinit();
+		esb_ppi_deinit();
+		return;
+	}
 #endif
 	if (esb_state == ESB_STATE_UNINITIALIZED) {
 		return;
@@ -2959,6 +2998,7 @@ int esb_read_rx_payload(struct esb_payload *payload)
 
 #if defined(CONFIG_ESB_RX_METADATA)
 	payload->rx_ticks = rx_fifo.payload[rx_fifo.front]->rx_ticks;
+	payload->tx_end_ticks = rx_fifo.payload[rx_fifo.front]->tx_end_ticks;
 	payload->rx_context = rx_fifo.payload[rx_fifo.front]->rx_context;
 	payload->rx_pose = rx_fifo.payload[rx_fifo.front]->rx_pose;
 #endif
@@ -3027,9 +3067,6 @@ int esb_start_rx(void)
 }
 
 #if defined(CONFIG_ESB_PRX_TX)
-/* Completion owns the same PPI/FEM cleanup on success and timeout. */
-static volatile bool prx_tx_active;
-static bool prx_tx_begun;
 
 static void on_radio_disabled_prx_tx(void)
 {
@@ -3050,7 +3087,9 @@ __attribute__((noipa))
 uint8_t *esb_prx_tx_prepare(const struct esb_payload *payload)
 {
 	if (!payload || !payload->length || payload->length > CONFIG_ESB_MAX_PAYLOAD_LENGTH ||
-	    payload->pipe >= CONFIG_ESB_PIPE_COUNT || prx_tx_active || prx_tx_begun ||
+	    payload->pipe >= CONFIG_ESB_PIPE_COUNT ||
+	    (esb_state != ESB_STATE_PRX && esb_state != ESB_STATE_PRX_SEND_ACK) ||
+	    prx_tx_active || prx_tx_begun ||
 	    esb_cfg.mode != ESB_MODE_PRX || esb_cfg.protocol != ESB_PROTOCOL_ESB_DPL) return NULL;
 	struct esb_radio_pdu *pdu = (struct esb_radio_pdu *)prx_tx_buffer;
 	memset(&pdu->type.dpl_pdu, 0, sizeof(pdu->type.dpl_pdu));
@@ -3102,11 +3141,39 @@ static bool prx_tx_event_fired(uint32_t event)
 	return *(volatile const uint32_t *)event != 0;
 }
 
-static int prx_tx_cancel(int error)
+static void prx_tx_isolate(void)
 {
-	clear_peripherals();
-	on_radio_disabled_prx_tx();
-	return error;
+	esb_ppi_for_txrx_clear(true, true);
+	esb_ppi_for_retransmission_clear();
+	nrf_radio_shorts_set(NRF_RADIO, 0);
+	nrf_radio_int_disable(NRF_RADIO, 0xffffffff);
+	esb_fem_reset();
+	nrfx_timer_disable(&esb_timer);
+	nrf_timer_shorts_set(esb_timer.p_reg, 0);
+	nrf_timer_int_disable(esb_timer.p_reg, 0xffffffff);
+	on_radio_disabled = NULL;
+}
+
+static void prx_tx_fault(void)
+{
+	esb_irq_disable();
+	prx_tx_reset();
+	prx_tx_faulted = true;
+	esb_state = ESB_STATE_UNINITIALIZED;
+}
+
+static int prx_tx_cancel(int error, int shutdown_error)
+{
+	prx_tx_isolate();
+	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
+	for (unsigned polls = 4096; polls; polls--) {
+		if (nrf_radio_state_get(NRF_RADIO) == NRF_RADIO_STATE_DISABLED) {
+			on_radio_disabled_prx_tx();
+			return error;
+		}
+	}
+	prx_tx_fault();
+	return shutdown_error;
 }
 
 #endif
@@ -3118,17 +3185,18 @@ int esb_prx_tx_arm_event(uint32_t delay_us, uint32_t start_event)
 #if defined(CONFIG_SOC_SERIES_NRF52)
 	if (!prx_tx_begun) return -EINVAL;
 	if (!start_event || delay_us < 5 || delay_us > 1000)
-		return prx_tx_cancel(-EINVAL);
+		return prx_tx_cancel(-EINVAL, -ETIMEDOUT);
 	unsigned polls = 4096;
 	while (!nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_DISABLED)) {
-		if (prx_tx_event_fired(start_event) || !--polls)
-			{
-			/* DISABLED is unconfirmed: never restart PRX or reuse DMA. */
-			prx_tx_begun = false;
-			prx_tx_length = 0;
-			esb_state = ESB_STATE_UNINITIALIZED;
+		if (!--polls) {
+			prx_tx_isolate();
+			prx_tx_fault();
 			return -ETIMEDOUT;
 		}
+	}
+	/* The caller owns the latched event until arm returns. */
+	if (prx_tx_event_fired(start_event)) {
+		return prx_tx_cancel(-ETIME, -ETIMEDOUT);
 	}
 	mpsl_fem_lna_configuration_clear();
 	struct esb_radio_pdu *pdu = (struct esb_radio_pdu *)prx_tx_buffer;
@@ -3151,7 +3219,9 @@ int esb_prx_tx_arm_event(uint32_t delay_us, uint32_t start_event)
 	nrf_radio_int_enable(NRF_RADIO, NRF_RADIO_INT_DISABLED_MASK);
 	__DMB();
 	esb_ppi_for_prx_tx_set(start_event);
-	if (prx_tx_event_fired(start_event)) return prx_tx_cancel(-ETIME);
+	if (prx_tx_event_fired(start_event)) {
+		return prx_tx_cancel(-ETIME, -ETIMEDOUT);
+	}
 	prx_tx_begun = false;
 	return 0;
 #else
@@ -3161,19 +3231,19 @@ int esb_prx_tx_arm_event(uint32_t delay_us, uint32_t start_event)
 
 int esb_prx_tx_wait(uint32_t delay_us)
 {
-	for (unsigned elapsed = 0; elapsed < delay_us + 500U; elapsed++) {
+	const uint32_t polls = MIN(delay_us, UINT32_MAX - 500U) + 500U;
+
+	for (uint32_t elapsed = 0; elapsed < polls; elapsed++) {
 		if (!prx_tx_active) {
 			return 0;
 		}
 		k_busy_wait(1);
 	}
 	unsigned key = irq_lock();
-	if (prx_tx_active) {
-		clear_peripherals();
-		on_radio_disabled_prx_tx();
-	}
+	int err = prx_tx_active ? prx_tx_cancel(-ETIMEDOUT, -EIO) : 0;
+
 	irq_unlock(key);
-	return -ETIMEDOUT;
+	return err;
 }
 #endif /* CONFIG_ESB_PRX_TX */
 

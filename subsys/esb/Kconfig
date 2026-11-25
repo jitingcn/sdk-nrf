@@ -155,24 +155,28 @@ config ESB_MPSL_TIMESLOT
 
 config ESB_HAS_RX_METADATA
 	def_bool y
+	depends on !(ESB_MPSL_TIMESLOT && ZERO_LATENCY_IRQS)
 	help
-	  Capability marker, always set when this driver provides
+	  Capability marker, set when this configuration supports
 	  ESB_RX_METADATA. Applications can depend on it to stay buildable
 	  with SDK revisions that do not have the option.
 
 config ESB_RX_METADATA
 	bool "Per-entry receive metadata and TX-end timestamps"
+	depends on ESB_HAS_RX_METADATA
 	help
-	  Store the receive END tick with each RX FIFO entry, let the
-	  application classify entries from the radio ISR through
-	  esb_config.rx_metadata_handler, and record the TX END tick of the
-	  attempt that received the last ACK (esb_last_ack_tx_end_ticks).
+	  Store the ISR tick with each RX FIFO entry. Ordinary PRX samples
+	  after DISABLED, so this tick can lag the hardware END event.
+	  ACK payloads also carry the TX END tick of the acknowledged
+	  attempt. Applications can classify entries through the
+	  esb_config.rx_metadata_handler callback in the radio ISR.
 	  Disabled by default; the driver then builds exactly as without
 	  this option.
 
 config ESB_HAS_PRX_TX
 	def_bool y
-	depends on SOC_SERIES_NRF52 && !ESB_MPSL_TIMESLOT
+	depends on SOC_SERIES_NRF52 && !ESB_MPSL_TIMESLOT && !ESB_FAST_SWITCHING
+	depends on !MPSL_FEM_NRF21540_GPIO_SPI
 	help
 	  Capability marker, set when this driver provides ESB_PRX_TX
 	  for the selected SoC.
