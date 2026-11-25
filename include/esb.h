@@ -305,6 +305,15 @@ struct esb_payload {
 			 */
 	uint8_t pid;    /**< PID assigned during communication. */
 	uint8_t data[CONFIG_ESB_MAX_PAYLOAD_LENGTH]; /**< The payload data. */
+#if defined(CONFIG_ESB_RX_METADATA)
+	/** ISR tick for this packet. Ordinary PRX samples after DISABLED and
+	 * may record a later tick than the hardware END event.
+	 */
+	uint32_t rx_ticks;
+	uint32_t tx_end_ticks; /**< TX-END ISR tick of the acknowledged attempt, zero in PRX. */
+	uint32_t rx_context; /**< Application receive-layout generation. */
+	bool rx_pose; /**< Application classification of this FIFO entry. */
+#endif
 };
 
 /** @brief Enhanced ShockBurst event. */
@@ -341,7 +350,7 @@ struct esb_rx_diagnostics {
 
 /** ISR-accurate timestamp (in ticks) captured when PTX receives a valid ACK.
  *  Written from RADIO ISR, read from application event handler.
- *  Use for precise time-sync T4 on the tracker side.
+ *  May advance before a FIFO entry is read. Use the entry timestamps for time sync.
  */
 extern volatile uint32_t esb_last_ack_rx_ticks;
 
@@ -403,6 +412,11 @@ struct esb_config {
 				 *  between nRF52 and/or nRF53 Series devices, this delay can
 				 *  be reduced to 40 µs.
 				 */
+#if defined(CONFIG_ESB_RX_METADATA)
+	/** Optional; called from the radio ISR for each new RX FIFO entry. */
+	void (*rx_metadata_handler)(const struct esb_payload *payload, uint32_t *rx_context,
+				    bool *rx_pose);
+#endif
 	esb_ack_handler ack_handler;	/**< ACK handler. */
 };
 
@@ -494,6 +508,50 @@ int esb_start_rx(void);
  *           Otherwise, a (negative) error code is returned.
  */
 int esb_stop_rx(void);
+
+#if defined(CONFIG_ESB_PRX_TX)
+/** Copy invariant bytes to a dedicated PRX TX DMA buffer before freeze.
+ * The returned bytes never overlap RX ACK data. The caller may keep writing
+ * them after arm_event returns, until RADIO START: the start event plus the
+ * arm_event() delay plus TX ramp-up, when EasyDMA begins fetching the packet.
+ * The caller must finish its last write and execute __DMB() before then; the
+ * driver does not check this deadline, so the caller guarantees the margin.
+ * Call with IRQs locked; only one prepared PRX TX may be outstanding.
+ * Returns NULL for invalid input or while a PRX TX is in progress.
+ *
+ * Every PRX TX is sent with PID 0; the PID is not advanced between
+ * transmissions. A plain ESB PRX that keeps duplicate-detection state
+ * treats a frame whose CRC and PID equal the previous packet on that pipe
+ * as a retransmission and drops it. Change the payload between transmissions
+ * (for example with a frame counter) if receivers must see every one.
+ */
+uint8_t *esb_prx_tx_prepare(const struct esb_payload *payload);
+/** Begin PRX ramp-down at freeze. IRQs must stay locked through arm_event.
+ * After success, arm_event must be called to finish arming.
+ */
+int esb_prx_tx_begin(void);
+/** Arm before a future hardware event starts the ESB timer. nRF52 only.
+ * Program and clear the event before begin. If it fires before arming ends,
+ * cancel the transmission, restore PRX and return -ETIME. Keep exclusive radio
+ * ownership through wait. If DISABLED cannot be confirmed, returns -ETIMEDOUT
+ * with RX stopped. Reinitialize ESB once the radio has stopped.
+ * The payload's data lives in the prepared DMA buffer.
+ */
+int esb_prx_tx_arm_event(uint32_t delay_us, uint32_t start_event);
+/** Wait for an armed PRX TX with IRQs enabled, recovering RX on timeout.
+ *
+ * The budget is counted from this call, not from the start event: the
+ * function polls for completion up to delay_us + 500 times with a 1 us busy
+ * wait between polls. The poll count saturates at UINT32_MAX. The
+ * caller must choose delay_us to cover the remaining time until start_event,
+ * the arm_event() delay, TX ramp-up and the full on-air time of the prepared
+ * packet at the configured bitrate; it need not equal the arm_event() delay.
+ * The fixed 500 us is margin for DISABLED handling, not airtime. On timeout
+ * the radio is stopped, PRX is restarted and -ETIMEDOUT is returned.
+ * If shutdown fails, returns -EIO with RX stopped until reinitialization.
+ */
+int esb_prx_tx_wait(uint32_t delay_us);
+#endif /* CONFIG_ESB_PRX_TX */
 
 /** @brief Flush the TX buffer.
  *
